@@ -1,66 +1,142 @@
 CC      := gcc
 
-# BUILD options:
-# "make"               : Mutual TLS enabled. Also enable full hardening (default)
-# "make DEBUG=1"       : Debug with sanitizers
-# "make TLS=0"         : Mutual TLS disabled
-# "make TLS=1"         : Mutual TLS enabled
-# "make DEBUG=1"       : Debug build (adds debug flags)
-# "sudo make install"  : Install the built binary to /usr/local/bin
-# "make clean"         : Cleanup
+# =====================================================================
+# Build Options:
+#   make                    : PROD (Hardened) build        → PROD=1 (default)
+#   make PROD=0             : DEV build (sanitizers + selectable logging)
+#   make BENCH=1            : BENCH build (Hardened + Optimized, minimal logs)
+#
+# Host Enforcement (per-mode defaults, override via make):
+#   PROD_HOST  (default: secure.lab.linux)
+#   DEV_HOST   (default: localhost)
+#   BENCH_HOST (default: 127.0.0.1)
+#
+# Examples:
+#   make                          # PROD, RV_ALLOWED_HOST="secure.lab.linux"
+#   make PROD_HOST=server.lab.linux
+#   make PROD=0 DEV_HOST=devbox.local
+#   make BENCH=1 BENCH_HOST=bench-node
+#
+# Logging overrides:
+#   make LOG_ALL=1           : Enable WARN + INFO + DEBUG (where allowed by mode)
+#   make WARN=1
+#   make INFO=1
+#   make DEBUG=1             : Only when PROD=0 (DEV mode)
+#
+#   make clean
+#   sudo make install
+# =====================================================================
 
+PROD    ?= 1        # 1 = PROD (default), 0 = DEV (ignored if BENCH=1)
+BENCH   ?= 0
 TLS     ?= 1
+WARN    ?= 0
+INFO    ?= 0
 DEBUG   ?= 0
+LOG_ALL ?= 0
+
+# Per-mode Host defaults (can be overridden on make command line)
+PROD_HOST  ?= secure.lab.linux
+DEV_HOST   ?= localhost
+BENCH_HOST ?= 127.0.0.1
+
+# =====================================================================
+# Mode Selection: BENCH → DEV → PROD
+# =====================================================================
+
+ifeq ($(BENCH),1)
+	MODE_FLAGS    := -D__BENCH__
+	MODE_MSG      := Mode: BENCH (Performance Testing)
+	CFLAGS_EXTRA  := -O2 -pipe   # Same optimisation level style as PROD
+	LDFLAGS_EXTRA :=
+	# BENCH: Disallow DEBUG logs (timing distortion)
+	ifeq ($(DEBUG),1)
+		$(error DEBUG logging is forbidden in BENCH builds)
+	endif
+	# Host definition for BENCH mode
+	HOST_DEF      := -DRV_ALLOWED_HOST=\"$(BENCH_HOST)\"
+	HOST_MSG      := Host (BENCH): $(BENCH_HOST)
+
+else ifeq ($(PROD),0)
+	MODE_FLAGS    := -D__DEV__
+	MODE_MSG      := Mode: DEV (Debug + Sanitizers)
+	CFLAGS_EXTRA  := -g3 -O0 -fsanitize=address,undefined
+	LDFLAGS_EXTRA := -fsanitize=address,undefined
+	# Host definition for DEV mode
+	HOST_DEF      := -DRV_ALLOWED_HOST=\"$(DEV_HOST)\"
+	HOST_MSG      := Host (DEV):   $(DEV_HOST)
+
+else
+	MODE_FLAGS    :=
+	MODE_MSG      := Mode: PROD (Hardened Default)
+	CFLAGS_EXTRA  := -O2 -pipe
+	LDFLAGS_EXTRA :=
+	# Host definition for PROD mode
+	HOST_DEF      := -DRV_ALLOWED_HOST=\"$(PROD_HOST)\"
+	HOST_MSG      := Host (PROD):  $(PROD_HOST)
+endif
+
+# =====================================================================
+# Logging Configuration
+# =====================================================================
+
+# LOG_ALL convenience override
+ifeq ($(LOG_ALL),1)
+    WARN  := 1
+    INFO  := 1
+    DEBUG := 1
+endif
+
+LOG_DEFS :=
+
+ifeq ($(WARN),1)
+	LOG_DEFS += -D__LOG_ENABLE_WARN__
+endif
+
+ifeq ($(INFO),1)
+	LOG_DEFS += -D__LOG_ENABLE_INFO__
+endif
+
+ifeq ($(DEBUG),1)
+  ifeq ($(PROD),0)
+	LOG_DEFS += -D__LOG_ENABLE_DEBUG__
+  else
+    $(error DEBUG logging is only allowed in DEV builds (use make PROD=0 DEBUG=1))
+  endif
+endif
+
+# =====================================================================
+# TLS option
+# =====================================================================
+
+ifeq ($(TLS),1)
+	TLS_MSG  := Mutual TLS: ENABLED
+	DEFS_TLS := -D__ENABLE_MUTUAL_TLS__
+else
+	TLS_MSG  := Mutual TLS: DISABLED
+	DEFS_TLS := -U__ENABLE_MUTUAL_TLS__
+endif
 
 # Detect C23 support
 CHECK_C23 := $(shell printf "int main(){}" | $(CC) -std=c23 -xc - -o /dev/null 2>/dev/null && echo yes || echo no)
-
 ifeq ($(CHECK_C23),yes)
 	CSTD := -std=c23
 else
 	CSTD := -std=c2x
 endif
 
-# Detect OpenSSL version and warn if insufficient
-OPENSSL_VER := $(shell openssl version 2>/dev/null | awk '{print $$2}')
-OPENSSL_OK := $(shell openssl version 2>/dev/null | grep -E "1\.1\.1|3\." > /dev/null && echo yes || echo no)
+# Core security hardening flags
+CFLAGS_BASE := \
+	$(CSTD) \
+	-Wall -Wextra -Werror -Wpedantic \
+	-Wformat=2 -Wshadow -Wpointer-arith \
+	-Wcast-align -Wwrite-strings \
+	-Wconversion -Wstrict-prototypes \
+	-D_FORTIFY_SOURCE=2 \
+	-fstack-protector-strong -fPIE
 
-ifeq ($(OPENSSL_OK),no)
-$(warning WARNING: Detected OpenSSL version '$(OPENSSL_VER)' may not fully support TLS 1.3)
-endif
-
-# Mutual TLS preprocessor flag
-ifeq ($(TLS),1)
-	DEFS := -DENABLE_MUTUAL_TLS
-	TLS_MSG := Mutual TLS: ENABLED
-else
-	DEFS := -UENABLE_MUTUAL_TLS
-	TLS_MSG := Mutual TLS: DISABLED
-endif
-
-# Debug options
-ifeq ($(DEBUG),1)
-	CFLAGS_EXTRA := -g3 -O0 -fsanitize=address,undefined
-	DEBUG_MSG := Debug build: ENABLED
-	LDFLAGS_EXTRA := -fsanitize=address,undefined
-else
-	CFLAGS_EXTRA := -O2 -pipe
-	DEBUG_MSG := Debug build: DISABLED
-	LDFLAGS_EXTRA :=
-endif
-
-# Base flags
-CFLAGS  := $(CSTD) \
-		   -Wall -Wextra -Werror -Wpedantic \
-		   -Wformat=2 -Wshadow -Wpointer-arith \
-		   -Wcast-align -Wwrite-strings \
-		   -Wconversion -Wstrict-prototypes \
-		   -D_FORTIFY_SOURCE=2 \
-		   -fstack-protector-strong \
-		   -fPIE \
-		   $(CFLAGS_EXTRA) \
-		   $(DEFS)
-
+# Final build flags
+CFLAGS  := $(CFLAGS_BASE) $(CFLAGS_EXTRA) $(MODE_FLAGS) $(DEFS_TLS) $(LOG_DEFS) $(HOST_DEF)
 LDFLAGS := -lssl -lcrypto -pie $(LDFLAGS_EXTRA)
 
 TARGET  := TCP_Server
@@ -69,10 +145,12 @@ PREFIX  := /usr/local/bin
 
 all: $(TARGET)
 	@echo "Using GCC: $$($(CC) --version | head -n 1)"
-	@echo "Selected C standard: $(CSTD)"
+	@echo "$(MODE_MSG)"
 	@echo "$(TLS_MSG)"
-	@echo "$(DEBUG_MSG)"
-	@echo "OpenSSL: $$($(CC) -E -x c /dev/null 2>/dev/null >/dev/null && openssl version || echo not found)"
+	@echo "Logging Flags: $(LOG_DEFS)"
+	@echo "Host: $(HOST_MSG)"
+	@echo "C Standard: $(CSTD)"
+	@echo "OpenSSL: $$(openssl version 2>/dev/null || echo not found)"
 
 $(TARGET): $(SRCS)
 	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET) $(LDFLAGS)
