@@ -1,3 +1,7 @@
+# =====================================================================
+# Build / Compilation Artifacts
+# =====================================================================
+
 # Prerequisites
 *.d
 
@@ -51,5 +55,43 @@ Module.symvers
 Mkfile.old
 dkms.conf
 
-# debug information files
+# Debug information files
 *.dwo
+
+# =====================================================================
+# Security: TLS Keys / Certificates / PKI Material
+# =====================================================================
+# (These must NEVER be committed for security reasons)
+
+certs/
+*.pem
+*.key
+*.csr
+*.crt
+*.cer
+*.pfx
+*.p12
+*.srl
+*.rnd
+
+# Common SSL test artifacts
+client*.pem
+server*.pem
+
+# =====================================================================
+# Backup / Temporary Editor Files
+# =====================================================================
+
+# Vim / Nano / Generic
+*~
+*.swp
+*.swo
+*.backup
+
+# VS Code / IDE metadata
+.vscode/
+.idea/
+
+# OS metadata
+.DS_Store
+Thumbs.db
