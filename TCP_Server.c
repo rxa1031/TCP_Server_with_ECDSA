@@ -38,304 +38,144 @@
 #include <sys/stat.h>     /* For jail directory permissions etc. */
 
 /*
- * =============================================================================
- * Build Options
- * =============================================================================
- *   make TLS=1     → TLS Server with Mutual TLS (client certificate required)
- *   make TLS=0     → TLS Server only (client certificate NOT required)
- *
- * Notes:
- *   - TLS is always enabled in both builds.
- *   - Plain TCP (without TLS) is not supported and will fail.
- *
- * =============================================================================
- * Testing: TLS=0 Build (Server Authentication Only)
- * =============================================================================
- * - Server presents its certificate: cert.pem
- * - Client is NOT required to present a certificate
- *
- * Command:
- *   openssl s_client -connect 127.0.0.1:8080 -servername 127.0.0.1 -CAfile ca-cert.pem -crlf -tls1_3
- * or
- *   openssl s_client -connect 127.0.0.1:8080 -servername localhost -CAfile ca-cert.pem -crlf -tls1_3
- *
- * Once connected, manually type:
- *   GET / HTTP/1.1
- *   Host: localhost
- *
- *   <press Enter twice to end headers>
- *
- * Expected:
- *   HTTP/1.1 200 OK
- *
- * =============================================================================
- * Testing: TLS=1 Build (Mutual TLS + Hostname Verification)
- * =============================================================================
- * A) Valid client certificate → Should succeed
- *    Command:
- *      openssl s_client -connect 127.0.0.1:8080 -servername 127.0.0.1 \
- *          -cert client-cert.pem -key client-key.pem \
- *          -CAfile ca-cert.pem -crlf -tls1_3
- *    Then manually type the HTTP request (as above)
- *
- * B) Missing client certificate → Should fail TLS handshake
- *    Command:
- *      openssl s_client -connect 127.0.0.1:8080 -servername 127.0.0.1 \
- *          -CAfile ca-cert.pem -crlf -tls1_3
- *
- * C) Wrong hostname → Should fail hostname verification
- *    Command:
- *      openssl s_client -connect 127.0.0.1:8080 -servername WRONG \
- *          -cert client-cert.pem -key client-key.pem \
- *          -CAfile ca-cert.pem -crlf -tls1_3
- *
- * Mutual TLS + Hostname Verification Validation:
- *   - A succeeds
- *   - B fails (no client certificate)
- *   - C fails (hostname mismatch)
- *
- * =============================================================================
- * Manual HTTP Request (All Builds)
- * =============================================================================
- * After handshake succeeds (TLS=0 OR TLS=1 with valid cert):
- *
- *   GET / HTTP/1.1
- *   Host: localhost
- *
- *   <press Enter twice to complete headers>
- *
- * Expected:
- *   HTTP/1.1 200 OK
- *
- * =============================================================================
- * Clean Shutdown
- * =============================================================================
- * Press Ctrl+C in the server terminal
- * Expected:
- *   Caught signal <n>. Cleaning up server loop and exiting...
- *   Server terminated.
- *
- * Ctrl+Z (SIGTSTP) is handled as a request to terminate cleanly rather than
- * suspending the process, to avoid leaving a background process that later
- * needs to be killed manually.
- *
- * =============================================================================
- */
+===============================================================================
+BUILD CONFIGURATION, MODE SELECTION, AND LOGGING
+===============================================================================
 
-/*
- * =============================================================================
- * System Prerequisites (Ubuntu / Debian-based / WSL2)
- * =============================================================================
- *
- * GCC 13 or newer is mandatory due to C23 usage in this project.
- *
- * Check current GCC version:
- *
- *     gcc --version
- *
- * If version is lower than 13 (common on WSL2 and Ubuntu 22.04 upgrades),
- * install and select GCC 13 as default:
- *
- *     sudo apt install software-properties-common
- *     sudo add-apt-repository ppa:ubuntu-toolchain-r/test
- *     sudo apt update
- *     sudo apt install gcc-13 g++-13
- *
- *     # Configure GCC 13 as the system default compiler:
- *     sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100
- *     sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100
- *     sudo update-alternatives --config gcc
- *
- * Required packages for building this server:
- *
- *     sudo apt install build-essential apt-file openssl libssl-dev
- *     sudo apt-file update
- *
- * Optional:
- *   If system OpenSSL version is older and TLS feature support is insufficient,
- *   build a recent OpenSSL manually:
- *
- *     mkdir ~/openssl_3_5
- *     cd ~/openssl_3_5
- *     wget https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz
- *     tar xzvf openssl-3.5.4.tar.gz
- *     cd openssl-3.5.4
- *     ./config
- *     make
- *     sudo make install
- *     openssl version -a
- *
- * Troubleshooting:
- *   If missing headers or link errors occur:
- *
- *     sudo apt list --upgradable
- *     sudo apt full-upgrade
- *
- *   If a specific package upgrade notice persists (e.g., snapd):
- *
- *     sudo apt-get --simulate install snapd
- *     sudo apt-get install snapd
- *
- * -----------------------------------------------------------------------------
- * Build Configuration and Host Enforcement (Makefile-controlled)
- * -----------------------------------------------------------------------------
- *
- *  - This C file does NOT hard-code build modes, logging policy, TLS enable/disable,
- *    or Host enforcement values.
- *
- *  - All such settings are injected by the Makefile via compiler definitions, e.g.:
- *
- *        -D__DEV__
- *        -D__BENCH__
- *        -D__ENABLE_MUTUAL_TLS__
- *        -DRV_ALLOWED_HOST="secure.lab.linux"
- *
- *  - Per-mode Host defaults (defined in Makefile, not here):
- *
- *        PROD_HOST  ?= secure.lab.linux
- *        DEV_HOST   ?= localhost
- *        BENCH_HOST ?= 127.0.0.1
- *
- *    The Makefile maps these to RV_ALLOWED_HOST at compile time.
- *
- * -----------------------------------------------------------------------------
- * PROD / BENCH Deployment Requirement:
- *   For hardened sandboxing, a chroot jail must be prepared before running:
- *
- *       sudo mkdir -p /var/secure-tls-server
- *       sudo cp cert.pem key.pem ca-cert.pem /var/secure-tls-server
- *       sudo chown -R root:root /var/secure-tls-server
- *       sudo chmod -R 750 /var/secure-tls-server
- *
- *   See rvDropPrivileges_AndChroot() for more details.
- * -----------------------------------------------------------------------------
- *
- * =============================================================================
+This section is intentionally placed at the very top of the translation unit so
+that any misuse of build flags or logging macros fails fast at compile time.
+
+Build modes (selected via Makefile → GCC -D defines):
+
+    - DEV build:
+        __DEV__   defined
+        __BENCH__ not defined
+        (optional) MODE_SAN defined automatically here unless explicitly set
+
+        Intended use:
+            - Development and debugging
+            - Sanitizers enabled via Makefile (e.g. -fsanitize=address,undefined)
+            - Logging may include WARN / INFO / DEBUG if corresponding
+              __LOG_ENABLE_* macros are defined.
+
+    - BENCH build:
+        __BENCH__ defined
+        __DEV__   not defined
+
+        Intended use:
+            - Performance / benchmarking
+            - Optimized build
+            - DEBUG logging is forbidden to avoid disturbing timing.
+
+    - PROD build (default):
+        Neither __DEV__ nor __BENCH__ is defined.
+        (This block sets __PROD__ internally as a convenience macro.)
+
+        Intended use:
+            - Hardened deployment mode
+            - Minimal logging; DEBUG logging forbidden.
+
+Mode selection is controlled ONLY via the Makefile. The C file never defines
+__DEV__ / __BENCH__ directly; it merely validates and interprets them.
+
+Valid final mode states are:
+
+    - DEV build:   __DEV__   defined, __BENCH__ not defined
+    - BENCH build: __BENCH__ defined, __DEV__   not defined
+    - PROD build:  neither __DEV__ nor __BENCH__ defined (treated as PROD)
+
+Any build that defines both __DEV__ and __BENCH__ at the same time is invalid.
+
+-------------------------------------------------------------------------------
+TLS Feature Selection (__ENABLE_MUTUAL_TLS__)
+-------------------------------------------------------------------------------
+
+    - If __ENABLE_MUTUAL_TLS__ is undefined:
+          Mutual TLS is disabled (server authenticates itself only).
+
+    - If __ENABLE_MUTUAL_TLS__ is defined:
+          Client certificate authentication is required; the TLS context
+          is configured accordingly (CA list, verify depth, etc.).
+
+-------------------------------------------------------------------------------
+Logging flags (from Makefile only)
+-------------------------------------------------------------------------------
+
+The following preprocessor symbols may be passed from the Makefile:
+
+    -D__LOG_ENABLE_WARN__
+    -D__LOG_ENABLE_INFO__
+    -D__LOG_ENABLE_DEBUG__
+
+Rules enforced here:
+
+    - __LOG_ENABLE_DEBUG__ is only allowed when __DEV__ is defined.
+      (DEBUG logging is forbidden in PROD and BENCH builds.)
+
+    - WARN and INFO are always allowed in any mode. The Makefile may also
+      provide a convenience flag (e.g. LOG_ALL=1) that expands to WARN+INFO.
+      If LOG_ALL ever attempts to enable DEBUG in PROD/BENCH, this block
+      will reject it at compile time.
+
+In addition, the Makefile should reject invalid combinations early, e.g.:
+
+    - make PROD=1 DEBUG=1   → error: "DEBUG is not allowed in PROD builds"
+    - make BENCH=1 DEBUG=1  → error: "DEBUG is not allowed in BENCH builds"
+    - make DEV=1 BENCH=1    → error: "DEV and BENCH cannot be enabled together"
+
+This C block provides a second line of defense if the Makefile is bypassed.
+
+===============================================================================
 */
 
-/*
- * =============================================================================
- * Local Build Options (direct gcc - alternative to using make)
- * =============================================================================
- * 1) Quick functional test (not hardened):
- *
- *      gcc TCP_Server.c -o TCP_Server -lssl -lcrypto
- *
- * NOTE:
- *   Not for performance or security validation. Use Makefile build instead.
- *
- * 2) Hardened warnings + optimisation  --> Equivalent to PROD behaviour
- *
- *      gcc -std=c2x TCP_Server.c -o TCP_Server \
- *          -Wall -Wextra -Werror -Wpedantic \
- *          -Wformat=2 -Wshadow -Wpointer-arith \
- *          -Wcast-align -Wwrite-strings -Wconversion \
- *          -O2 \
- *          -lssl -lcrypto
- *
- * NOTE for reviewers:
- *   This approximates the PROD mode produced via Makefile,
- *   but it does NOT include the complete set of hardening
- *   flags that Makefile adds (PIE, FORTIFY, RELRO, stack protector, etc.).
- *   In Makefile terms: this corresponds to PROD mode (default) without full hardening.
- *
- * 3) Mutual TLS (client certificate required):
- *
- *      gcc -std=c2x TCP_Server.c -o TLS_Server_mTLS \
- *          -Wall -Wextra -Werror -Wpedantic \
- *          -Wformat=2 -Wshadow -Wpointer-arith \
- *          -Wcast-align -Wwrite-strings -Wconversion \
- *          -O2 \
- *          -D__ENABLE_MUTUAL_TLS__ \
- *          -lssl -lcrypto
- *
- * 4) Development mode (sanitisers + verbose logging - equivalent to make PROD=0):
- *
- *      gcc -std=c2x TCP_Server.c -o TLS_Server_DEV \
- *          -Wall -Wextra -g3 -O0 \
- *          -D__DEV__ \
- *          -D__LOG_ENABLE_WARN__ \
- *          -D__LOG_ENABLE_INFO__ \
- *          -D__LOG_ENABLE_DEBUG__ \
- *          -fsanitize=address,undefined \
- *          -lssl -lcrypto
- *
- * For actual hardened deployment or performance benchmarking:
- *      Please build using:  make
- *
- * This guarantees:
- *   - All security hardening flags are enabled
- *   - Mode selection (__DEV__ / __BENCH__) is correct
- *   - Logging rules are enforced based on security policy
+/* ============================================================================
+ * Build Mode Validation and Selection
+ * ============================================================================
  */
 
+#if defined(__DEV__) && defined(__BENCH__)
+#error "__DEV__ and __BENCH__ must not both be defined (mode conflict)."
+#endif
+
+#if defined(__DEV__)
+    #define MODE_NAME "DEV"
+#elif defined(__BENCH__)
+    #define MODE_NAME "BENCH"
+#else
+    /* Neither DEV nor BENCH: treat as PROD (secure default) */
+    #define __PROD__ 1
+    #define MODE_NAME "PROD"
+#endif
+
+/* ============================================================================
+ * Auto-enable sanitizers in DEV (if not explicitly overridden)
+ * ============================================================================
+ */
+#if defined(__DEV__) && !defined(MODE_SAN)
+    #define MODE_SAN 1
+#endif
+
 /*
- * =============================================================================
- *  PRIMARY MODES, SECURITY FEATURES, AND LOGGING BEHAVIOR
- * =============================================================================
- *
- * Selected at build time using Makefile (GCC -D defines):
- *
- *   PROD   (default): make
- *   DEV mode        : make PROD=0
- *   BENCH=1         : make BENCH=1
- *
- * Mode Precedence:
- *
- * Mutually exclusive modes:
- *   - Makefile ensures only one mode (__DEV__ or __BENCH__) is ever defined
- *   - If neither is defined → PROD (safe default)
- *
- * -----------------------------------------------------------------------------
- * Features by Mode
- * -----------------------------------------------------------------------------
- * Mode ↓ / Feature →  TLSH  Logs*  ASan  Timing  Sandbox
- * -----------------------------------------------------
- * PROD (default)       1     sel    0     1       1
- * DEV                  1     sel    1     0       0
- * BENCH                1     sel    0     0       1
- * -----------------------------------------------------
- *
- * -----------------------------------------------------------------------------
- * Logging Enforcement by Mode
- * -----------------------------------------------------------------------------
- * Mode ↓  / Log →   ERROR  WARN  INFO  DEBUG
- * ------------------------------------------
- * PROD (default)     1     0/1   0/1   0   ← WARN & INFO allowed only if requested
- * PROD (allowed)     1     1     1     0   ← WARN & INFO allowed only if requested
- * DEV                1     0/1   0/1   0/1 ← Developer decides via sub-flags
- * BENCH              1     0/1   0/1   0   ← DEBUG never allowed
- * ------------------------------------------
- *
- * Log Request Macros (optional, via Makefile → GCC -D)
- *   -D__LOG_ENABLE_WARN__
- *   -D__LOG_ENABLE_INFO__
- *   -D__LOG_ENABLE_DEBUG__  (denied in PROD/BENCH)
- *   LOG_ALL=1  (Makefile expands this to all three __LOG_ENABLE_*__ macros)
- *
- * Hard Denials:
- *   DEBUG logs are never allowed in PROD or BENCH builds:
- *     #error raised if LOG_ENABLE_DEBUG is requested in forbidden modes
- *
- * =============================================================================
+ * At this point:
+ *   - Exactly one of: (__DEV__, __BENCH__, __PROD__) is logically active.
+ *   - MODE_NAME is a human-readable string for logging / banners.
+ *   - MODE_SAN may be used to gate sanitizer-specific logic if needed.
  */
 
 /* ============================================================================
- * Logging Macros
+ * Logging Sub-Flag Enforcement
  * ============================================================================
  *
- * LOG_ERROR / LOG_WARN / LOG_INFO:
- *   - Always compiled in.
- *   - Never include __FILE__ or __LINE__ in messages.
- *
- * LOG_DEBUG:
- *   - Enabled only when (__DEV__ & __LOG_ENABLE_DEBUG__) from Makefile
- *   - Compiled out entirely in BENCH or PROD builds
- *   - Intended for developer diagnostics only
+ * DEBUG logging is strictly restricted to DEV builds.
+ * If __LOG_ENABLE_DEBUG__ is set without __DEV__, this is a hard error.
  */
 
+#if defined(__LOG_ENABLE_DEBUG__) && !defined(__DEV__)
+#error "DEBUG logging is only allowed in __DEV__ builds. Remove __LOG_ENABLE_DEBUG__ or build with DEV=1."
+#endif
+
 /* ============================================================================
- * Default log threshold per mode
+ * Logging Helpers and Implementations
  * ============================================================================
  */
 
@@ -346,130 +186,929 @@
         fflush((stream)); \
     } while (false)
 
-/* ============================================================================
- * Build Mode Detection
- * ============================================================================
- *
- * This server now supports three logical build modes, selected only via
- * Makefile → GCC -D defines:
- *
- *   PROD  : Default when neither __DEV__ nor __BENCH__ is defined.
- *           Hardened deployment mode. Minimal logging; DEBUG forbidden.
- *
- *   __DEV__  : Development mode (sanitizers enabled via Makefile, e.g. -fsanitize).
- *              Logging can include WARN/INFO/DEBUG if corresponding
- *              __LOG_ENABLE_*__ macros are defined.
- *
- *   __BENCH__ : Performance benchmarking mode. Optimized, minimal logs.
- *               DEBUG logging is forbidden to avoid distorting measurements.
- *
- * Notes:
- *   - __DEV__ and __BENCH__ must never both be defined at the same time.
- *   - DEV vs BENCH is chosen by Makefile based on DEV=1 / BENCH=1 flags.
- */
-
-/*
- * ============================================================================
- * Mode Selection (Enforced + Auto SAN in DEV)
- * ============================================================================
- *
- * - __DEV__ and __BENCH__ must not coexist
- * - MODE_SAN enabled automatically for DEV builds
- * - If neither defined → PROD mode (secure default)
- */
-#if defined(__DEV__) && defined(__BENCH__)
-#error "__DEV__ and __BENCH__ must not be defined together."
-#endif
-
-#if defined(__DEV__) && !defined(MODE_SAN)
-#define MODE_SAN 1
-#endif
-
-#if defined(__DEV__)
-	/* DEV Mode: Sanitizers + Expanded Logging */
-#elif defined(__BENCH__)
-	/* BENCH Mode: Performance benchmarking */
-#else
-	/* PROD Mode: Hardened minimal logging */
-#endif
-
-/* ============================================================================
- * TLS Feature Selection (__ENABLE_MUTUAL_TLS__)
- * ============================================================================
- *
- * If undefined → Mutual TLS is disabled
- * If defined   → Client authentication required
- */
-
-/* ============================================================================
- * Logging Sub-Flag Enforcement
- * ============================================================================
- *
- * Flags allowed only from Makefile:
- *   -D__LOG_ENABLE_WARN__
- *   -D__LOG_ENABLE_INFO__
- *   -D__LOG_ENABLE_DEBUG__
- *
- * DEBUG allowed **only** in __DEV__ mode.
- */
-
-#if !defined(__DEV__) && defined(__LOG_ENABLE_DEBUG__)
-#error "DEBUG logging is only allowed in __DEV__ builds. Remove __LOG_ENABLE_DEBUG__ or build with DEV=1."
-#endif
-
-/* ============================================================================
- * Logging Implementations
- * ============================================================================
- */
-
+/* Base error logger: always enabled */
 #define LOG_ERROR(fmt, ...) \
     LOG_PRINT_STD(stderr, "[ERROR] ", fmt, ##__VA_ARGS__)
 
+/* WARN logger: enabled only if explicitly requested */
 #ifdef __LOG_ENABLE_WARN__
-#define LOG_WARN(fmt, ...) \
-    LOG_PRINT_STD(stderr, "[WARN ] ", fmt, ##__VA_ARGS__)
+    #define LOG_WARN(fmt, ...) \
+        LOG_PRINT_STD(stderr, "[WARN ] ", fmt, ##__VA_ARGS__)
 #else
-#define LOG_WARN(fmt, ...) do {} while(0)
+    #define LOG_WARN(fmt, ...) \
+        do {} while (0)
 #endif
 
+/* INFO logger: enabled only if explicitly requested */
 #ifdef __LOG_ENABLE_INFO__
-#define LOG_INFO(fmt, ...) \
-    LOG_PRINT_STD(stdout, "[INFO ] ", fmt, ##__VA_ARGS__)
+    #define LOG_INFO(fmt, ...) \
+        LOG_PRINT_STD(stdout, "[INFO ] ", fmt, ##__VA_ARGS__)
 #else
-#define LOG_INFO(fmt, ...) do {} while(0)
+    #define LOG_INFO(fmt, ...) \
+        do {} while (0)
 #endif
 
+/*
+ * DEBUG logger:
+ *   - Only compiled in when both __DEV__ and __LOG_ENABLE_DEBUG__ are defined.
+ *   - Otherwise becomes a no-op.
+ */
 #if defined(__DEV__) && defined(__LOG_ENABLE_DEBUG__)
-#define LOG_DEBUG(fmt, ...) \
-    LOG_PRINT_STD(stdout, "[DEBUG] ", fmt, ##__VA_ARGS__)
+    #define LOG_DEBUG(fmt, ...) \
+        LOG_PRINT_STD(stdout, "[DEBUG] ", fmt, ##__VA_ARGS__)
 #else
-#define LOG_DEBUG(fmt, ...) do {} while(0)
+    #define LOG_DEBUG(fmt, ...) \
+        do {} while (0)
 #endif
 
-#if 1
+/*
+ * Convenience logger that appends strerror_r text for the current errno.
+ * Uses POSIX strerror_r semantics; falls back to "errno N" if needed.
+ */
 #define LOG_ERROR_ERRNO(fmt, ...) \
     do { \
         char errbuf[512]; \
-        const char* errstr = errbuf; \
+        const char *errstr = errbuf; \
         int __e = errno; \
         if (0 != strerror_r(__e, errbuf, sizeof(errbuf))) { \
             snprintf(errbuf, sizeof(errbuf), "errno %d", __e); \
         } \
         LOG_ERROR(fmt ": %s", ##__VA_ARGS__, errstr); \
-    } while(0)
-#else // of 1
-#define LOG_ERROR_ERRNO(msg) \
-    do { \
-        char errbuf[512]; \
-        const char* errstr = errbuf; \
-        int __e = errno; \
-        /* POSIX strerror_r */ \
-        if (0 != strerror_r(__e, errbuf, sizeof(errbuf))) { \
-            snprintf(errbuf, sizeof(errbuf), "errno %d", __e); \
-        } \
-        LOG_ERROR("%s: %s", msg, errstr); \
-    } while(0)
-#endif // of 1
+    } while (0)
+
+/**
+===============================================================================
+@file   TCP_Server.c
+@brief  Hardened TLS Server (default) with Configurable Build Security Modes
+
+Default build behavior (when running plain "make"):
+
+    - PROD mode (hardened security, minimal logs).
+    - Mutual TLS enabled (TLS=1, client certificate required).
+    - Strict HTTP Host enforcement using RV_ALLOWED_HOST.
+    - TLS listener on TCP port 443 (standard HTTPS/TLS port).
+
+User-configurable build-time security modes and options:
+
+    - Security mode:
+        * PROD  (default, hardened deployment)
+        * DEV   (debugging and sanitizers)
+        * BENCH (performance benchmarking)
+
+    - TLS authentication:
+        * TLS=1: mutual TLS (client certificate required)
+        * TLS=0: server-auth TLS only (no client certificate requested)
+
+    - Logging visibility:
+        * WARN, INFO, DEBUG enabled/disabled via Make flags,
+          subject to strict per-mode policy (DEBUG forbidden in PROD/BENCH).
+
+The final server binary is fully user configurable at build time via the
+Makefile flags, with the default configuration being a hardened PROD TLS
+server with strict host enforcement.
+
+===============================================================================
+BUILD MODES (MAKEFILE-CONTROLLED)
+===============================================================================
+
+Mode precedence (highest to lowest):
+
+    1) BENCH=1   -> BENCH mode
+    2) PROD=0    -> DEV mode
+    3) Otherwise -> PROD mode (default)
+
+Effective compile-time state:
+
+    - DEV build:   __DEV__ is defined; __BENCH__ is not defined.
+    - BENCH build: __BENCH__ is defined; __DEV__ is not defined.
+    - PROD build:  neither __DEV__ nor __BENCH__ is defined (treated as PROD).
+
+TLS is ALWAYS enabled in all modes (no plain TCP).
+
+-------------------------------------------------------------------------------
+TLS selection (via Makefile)
+-------------------------------------------------------------------------------
+
+    TLS=1 (default):
+        - Mutual TLS (client certificate required).
+        - Server certificate is presented to the client.
+        - Client certificate must be presented and validated.
+        - Hostname verification uses TLS SNI / certificate SAN.
+        - Compile-time: __ENABLE_MUTUAL_TLS__ defined.
+
+    TLS=0:
+        - Server-auth TLS only (no client certificate requested).
+        - Server certificate is validated by the client.
+        - TLS encryption is still enforced; only mutual authentication is
+          disabled.
+        - Compile-time: __ENABLE_MUTUAL_TLS__ not defined.
+
+All modes listen on TCP port 443 by default. Binding to port 443 normally
+requires starting as root and then dropping privileges.
+
+-------------------------------------------------------------------------------
+Mode capabilities summary
+-------------------------------------------------------------------------------
+
+Mode | TLS (0/1) | Client Cert (TLS=1) | Logging Allowed            | Host Enforcement            | Typical Use
+-----+-----------+---------------------+----------------------------+-----------------------------+--------------------------
+PROD |   0 or 1  | Required when TLS=1 | ERROR + optional WARN/INFO | Strict reject on mismatch   | Hardened deployment
+DEV  |   0 or 1  | Required when TLS=1 | ERROR/WARN/INFO/DEBUG/ALL  | Warning only (no reject)    | Development and debugging
+BENCH|   0 or 1  | Required when TLS=1 | ERROR + optional WARN/INFO | Logged only, no reject      | Performance benchmarking
+
+===============================================================================
+FEATURES BY MODE (TLSH, LOGS, ASAN, TIMING, SANDBOX)
+===============================================================================
+
+Legend:
+    TLSH   : TLS is always enabled (1 = enabled)
+    Logs*  : Logs selectable via WARN / INFO / DEBUG flags (and LOG_ALL in DEV)
+    ASan   : Address/Undefined sanitizers enabled (via Makefile flags)
+    Timing : Optimized for stable timing (1) or debug (0)
+    Sandbox: chroot + privilege drop required/enabled
+
+Mode (rows) vs Feature (columns):
+
+    Mode / Feature ->  TLSH  Logs*  ASan  Timing  Sandbox
+    -----------------------------------------------------
+    PROD (default)   1     sel    0     1       1
+    DEV              1     sel    1     0       0
+    BENCH            1     sel    0     0       1
+    -----------------------------------------------------
+
+Interpretation:
+
+    - TLSH = 1 in all modes: TLS is never disabled.
+    - Logs* "sel" means WARN/INFO/DEBUG are controlled via compile-time flags.
+    - ASan enabled only in DEV (via Makefile: -fsanitize=address,undefined).
+    - Timing:
+        PROD  : Optimized with hardening.
+        DEV   : Instrumented and non-optimized (not suitable for timing).
+        BENCH : Optimized, minimal logs to avoid measurement distortion.
+    - Sandbox:
+        PROD/BENCH: use chroot + privilege drop.
+        DEV      : no chroot / privilege drop for easier debugging.
+
+===============================================================================
+LOGGING ENFORCEMENT BY MODE
+===============================================================================
+
+Legend:
+    "1"   : Always enabled.
+    "0"   : Always disabled.
+    "0/1" : Enabled or disabled depending on compile-time log flags.
+
+Mode / Log-level matrix:
+
+    Mode / Log ->   ERROR  WARN  INFO  DEBUG
+    ----------------------------------------
+    PROD (default)   1     0/1   0/1   0
+    PROD (allowed)   1     1     1     0   (WARN and INFO only if requested)
+    DEV              1     0/1   0/1   0/1
+    BENCH            1     0/1   0/1   0
+    ----------------------------------------
+
+Log request macros (provided via Makefile -> GCC -D):
+
+    -D__LOG_ENABLE_WARN__
+    -D__LOG_ENABLE_INFO__
+    -D__LOG_ENABLE_DEBUG__   (allowed only in DEV builds)
+    LOG_ALL=1                (Makefile expands this to WARN+INFO+DEBUG in DEV)
+
+Hard denials:
+
+    - DEBUG logs are never allowed in PROD or BENCH builds.
+    - If __LOG_ENABLE_DEBUG__ is defined without __DEV__, a compile-time
+      error is raised by this file.
+
+===============================================================================
+VALID MAKE COMMANDS (TOTAL 34 SUPPORTED COMBINATIONS)
+===============================================================================
+
+PROD builds (PROD=1, DEBUG and LOG_ALL not allowed):
+
+    make PROD=1 TLS=1
+    make PROD=1 TLS=0
+    make PROD=1 TLS=1 WARN=1
+    make PROD=1 TLS=1 INFO=1
+    make PROD=1 TLS=1 WARN=1 INFO=1
+    make PROD=1 TLS=0 WARN=1
+    make PROD=1 TLS=0 INFO=1
+    make PROD=1 TLS=0 WARN=1 INFO=1
+
+DEV builds (PROD=0, all logging flags allowed):
+
+    make PROD=0 TLS=1
+    make PROD=0 TLS=0
+    make PROD=0 TLS=1 WARN=1
+    make PROD=0 TLS=0 WARN=1
+    make PROD=0 TLS=1 INFO=1
+    make PROD=0 TLS=0 INFO=1
+    make PROD=0 TLS=1 WARN=1 INFO=1
+    make PROD=0 TLS=0 WARN=1 INFO=1
+    make PROD=0 TLS=1 DEBUG=1
+    make PROD=0 TLS=0 DEBUG=1
+    make PROD=0 TLS=1 WARN=1 DEBUG=1
+    make PROD=0 TLS=0 WARN=1 DEBUG=1
+    make PROD=0 TLS=1 INFO=1 DEBUG=1
+    make PROD=0 TLS=0 INFO=1 DEBUG=1
+    make PROD=0 TLS=1 WARN=1 INFO=1 DEBUG=1
+    make PROD=0 TLS=0 WARN=1 INFO=1 DEBUG=1
+    make PROD=0 TLS=1 LOG_ALL=1
+    make PROD=0 TLS=0 LOG_ALL=1
+
+BENCH builds (BENCH=1, DEBUG and LOG_ALL not allowed):
+
+    make BENCH=1 TLS=1
+    make BENCH=1 TLS=0
+    make BENCH=1 TLS=1 WARN=1
+    make BENCH=1 TLS=0 WARN=1
+    make BENCH=1 TLS=1 INFO=1
+    make BENCH=1 TLS=0 INFO=1
+    make BENCH=1 TLS=1 WARN=1 INFO=1
+    make BENCH=1 TLS=0 WARN=1 INFO=1
+
+Any other combination of PROD / BENCH / TLS / WARN / INFO / DEBUG / LOG_ALL
+is considered invalid and should fail at Makefile or compile time.
+
+Total valid build combinations: 34.
+
+===============================================================================
+CONFIGURATION MAPPING (MAKE vs DIRECT gcc -D... USAGE)
+===============================================================================
+
+This server is intended to be built via the Makefile. The Makefile ensures:
+
+    - Exactly one mode is selected: PROD / DEV / BENCH.
+    - TLS mode (TLS=0 / TLS=1) is correctly mapped to __ENABLE_MUTUAL_TLS__.
+    - Logging macros (__LOG_ENABLE_WARN__/INFO/DEBUG) are consistent with mode.
+    - RV_ALLOWED_HOST is set to the correct value per mode.
+    - Hardened compiler/linker flags are applied for PROD and BENCH builds.
+
+However, for debugging, experimentation, or when integrating with other build
+systems, it can be useful to know how a given "make" configuration maps onto
+an equivalent direct "gcc -D..." command.
+
+Important rules:
+
+    - The Makefile builds are the canonical, hardened builds.
+    - Direct gcc examples below are approximate and do NOT include all
+      hardening flags (RELRO, FORTIFY, PIE, etc.).
+    - Direct gcc builds should NOT be used for production deployment.
+
+Each configuration below is described as:
+
+    Configuration:
+        Make command:
+            ...
+        Equivalent gcc command:
+            ...
+        Why equivalent:
+            ...
+        Security note:
+            ...
+
+-------------------------------------------------------------------------------
+1) PROD mode, TLS=1 (mutual TLS), WARN+INFO logs enabled
+-------------------------------------------------------------------------------
+
+Configuration:
+    PROD mode (hardened), mutual TLS required, WARN+INFO logs enabled.
+
+Make command (recommended):
+
+    make PROD=1 TLS=1 WARN=1 INFO=1
+
+Equivalent gcc command (approximate):
+
+    gcc TCP_Server.c -o TCP_Server \
+        -D__ENABLE_MUTUAL_TLS__ \
+        -DRV_ALLOWED_HOST=\"secure.lab.linux\" \
+        -D__LOG_ENABLE_WARN__ \
+        -D__LOG_ENABLE_INFO__ \
+        -std=c2x \
+        -Wall -Wextra -Werror -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -O2 \
+        -lssl -lcrypto
+
+Why equivalent:
+
+    - PROD mode: neither __DEV__ nor __BENCH__ is defined.
+    - TLS=1 maps to __ENABLE_MUTUAL_TLS__.
+    - WARN=1 and INFO=1 map to __LOG_ENABLE_WARN__ and __LOG_ENABLE_INFO__.
+    - RV_ALLOWED_HOST is set to "secure.lab.linux" as in the Makefile defaults.
+
+Security note:
+
+    - This gcc example does not enable all the hardening flags that the
+      Makefile may add (such as full RELRO, PIE, stack protections).
+    - Use the Makefile build for real deployments.
+
+-------------------------------------------------------------------------------
+2) PROD mode, TLS=0 (server-auth only), WARN logs only
+-------------------------------------------------------------------------------
+
+Configuration:
+    PROD mode, server-auth TLS only, WARN logs enabled (no mutual TLS).
+
+Make command:
+
+    make PROD=1 TLS=0 WARN=1
+
+Equivalent gcc command:
+
+    gcc TCP_Server.c -o TCP_Server \
+        -DRV_ALLOWED_HOST=\"secure.lab.linux\" \
+        -D__LOG_ENABLE_WARN__ \
+        -std=c2x \
+        -Wall -Wextra -Werror -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -O2 \
+        -lssl -lcrypto
+
+Why equivalent:
+
+    - __ENABLE_MUTUAL_TLS__ is not defined (TLS=0).
+    - WARN logs are enabled via __LOG_ENABLE_WARN__.
+    - Host enforcement for PROD is still strict: HTTP Host must match
+      RV_ALLOWED_HOST.
+
+Security note:
+
+    - Server still uses TLS on port 443, but does not require client
+      certificates.
+    - Hardened deployment should still use the Makefile build.
+
+-------------------------------------------------------------------------------
+3) DEV mode, TLS=1 (mutual TLS), all logs enabled (LOG_ALL)
+-------------------------------------------------------------------------------
+
+Configuration:
+    DEV mode, mutual TLS, WARN + INFO + DEBUG logs enabled.
+
+Make command:
+
+    make PROD=0 TLS=1 LOG_ALL=1
+
+Equivalent gcc command:
+
+    gcc TCP_Server.c -o TCP_Server \
+        -D__DEV__ \
+        -D__ENABLE_MUTUAL_TLS__ \
+        -D__LOG_ENABLE_WARN__ \
+        -D__LOG_ENABLE_INFO__ \
+        -D__LOG_ENABLE_DEBUG__ \
+        -std=c2x \
+        -g3 -O0 \
+        -fsanitize=address,undefined \
+        -Wall -Wextra -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -lssl -lcrypto
+
+Why equivalent:
+
+    - PROD=0 maps to __DEV__ (DEV mode).
+    - TLS=1 maps to __ENABLE_MUTUAL_TLS__.
+    - LOG_ALL=1 in the Makefile expands to all three __LOG_ENABLE_* macros.
+    - DEV builds enable sanitizers and debug information.
+
+Security note:
+
+    - DEV builds are not hardened for production (sanitizers, no chroot, no
+      privilege drop).
+    - Intended only for development and debugging.
+
+-------------------------------------------------------------------------------
+4) DEV mode, TLS=0 (server-auth only), DEBUG-only logging
+-------------------------------------------------------------------------------
+
+Configuration:
+    DEV mode, TLS=0 (no mutual TLS), DEBUG logging enabled (no WARN/INFO).
+
+Make command:
+
+    make PROD=0 TLS=0 DEBUG=1
+
+Equivalent gcc command:
+
+    gcc TCP_Server.c -o TCP_Server \
+        -D__DEV__ \
+        -D__LOG_ENABLE_DEBUG__ \
+        -std=c2x \
+        -g3 -O0 \
+        -fsanitize=address,undefined \
+        -Wall -Wextra -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -lssl -lcrypto
+
+Why equivalent:
+
+    - DEV mode is selected with __DEV__.
+    - No __ENABLE_MUTUAL_TLS__ means TLS=0 (still encrypted, no client certs).
+    - DEBUG=1 maps to __LOG_ENABLE_DEBUG__.
+    - Sanitizers and debug info reflect DEV mode.
+
+Security note:
+
+    - DEBUG logging may expose internal data and is never allowed in PROD or
+      BENCH builds.
+    - Use only in safe development environments.
+
+-------------------------------------------------------------------------------
+5) BENCH mode, TLS=1 (mutual TLS), INFO logs only
+-------------------------------------------------------------------------------
+
+Configuration:
+    BENCH mode, TLS=1, INFO logs enabled only.
+
+Make command:
+
+    make BENCH=1 TLS=1 INFO=1
+
+Equivalent gcc command:
+
+    gcc TCP_Server.c -o TCP_Server \
+        -D__BENCH__ \
+        -D__ENABLE_MUTUAL_TLS__ \
+        -DRV_ALLOWED_HOST=\"127.0.0.1\" \
+        -D__LOG_ENABLE_INFO__ \
+        -std=c2x \
+        -O2 \
+        -Wall -Wextra -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -lssl -lcrypto
+
+Why equivalent:
+
+    - BENCH=1 maps to __BENCH__, with neither __DEV__ nor __PROD__ defined.
+    - TLS=1 maps to __ENABLE_MUTUAL_TLS__.
+    - INFO=1 maps to __LOG_ENABLE_INFO__.
+    - RV_ALLOWED_HOST is typically 127.0.0.1 for BENCH builds.
+
+Security note:
+
+    - BENCH mode aims for realistic performance with minimal logging.
+    - DEBUG logging is forbidden to avoid affecting timing measurements.
+
+-------------------------------------------------------------------------------
+6) BENCH mode, TLS=0 (server-auth only), WARN logs only
+-------------------------------------------------------------------------------
+
+Configuration:
+    BENCH mode, TLS=0, WARN logs enabled.
+
+Make command:
+
+    make BENCH=1 TLS=0 WARN=1
+
+Equivalent gcc command:
+
+    gcc TCP_Server.c -o TCP_Server \
+        -D__BENCH__ \
+        -DRV_ALLOWED_HOST=\"127.0.0.1\" \
+        -D__LOG_ENABLE_WARN__ \
+        -std=c2x \
+        -O2 \
+        -Wall -Wextra -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -lssl -lcrypto
+
+Why equivalent:
+
+    - __BENCH__ selects BENCH mode.
+    - No __ENABLE_MUTUAL_TLS__ corresponds to TLS=0 (still TLS, no client
+      certificates).
+    - WARN=1 maps to __LOG_ENABLE_WARN__.
+
+Security note:
+
+    - These builds are for benchmarking. Use the Makefile and avoid adding
+      DEBUG logs or extra diagnostics which would distort measurements.
+
+-------------------------------------------------------------------------------
+7) Minimal examples (summary)
+-------------------------------------------------------------------------------
+
+Minimal PROD, mutual TLS, no extra logs:
+
+    make PROD=1 TLS=1
+
+Approximate gcc:
+
+    gcc TCP_Server.c -o TCP_Server \
+        -D__ENABLE_MUTUAL_TLS__ \
+        -DRV_ALLOWED_HOST=\"secure.lab.linux\" \
+        -std=c2x -O2 \
+        -Wall -Wextra -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -lssl -lcrypto
+
+Minimal DEV, server-auth only, no extra logs:
+
+    make PROD=0 TLS=0
+
+Approximate gcc:
+
+    gcc TCP_Server.c -o TCP_Server \
+        -D__DEV__ \
+        -std=c2x \
+        -g3 -O0 \
+        -fsanitize=address,undefined \
+        -Wall -Wextra -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -lssl -lcrypto
+
+Minimal BENCH, mutual TLS, no extra logs:
+
+    make BENCH=1 TLS=1
+
+Approximate gcc:
+
+    gcc TCP_Server.c -o TCP_Server \
+        -D__BENCH__ \
+        -D__ENABLE_MUTUAL_TLS__ \
+        -DRV_ALLOWED_HOST=\"127.0.0.1\" \
+        -std=c2x \
+        -O2 \
+        -Wall -Wextra -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -lssl -lcrypto
+
+Again, for any deployment, use the Makefile-based builds. The gcc examples
+are only provided to clarify which -D macros and flags correspond to which
+Makefile configurations.
+
+===============================================================================
+HOST ENFORCEMENT AND ALLOWED HOSTS
+===============================================================================
+
+The Makefile sets RV_ALLOWED_HOST at compile time, using:
+
+    PROD_HOST  ?= secure.lab.linux
+    DEV_HOST   ?= localhost
+    BENCH_HOST ?= 127.0.0.1
+
+and then:
+
+    PROD  build  -> RV_ALLOWED_HOST = $(PROD_HOST)
+    DEV   build  -> RV_ALLOWED_HOST = $(DEV_HOST)
+    BENCH build  -> RV_ALLOWED_HOST = $(BENCH_HOST)
+
+Runtime behavior:
+
+    PROD  builds:
+        - HTTP "Host" header must match RV_ALLOWED_HOST exactly.
+        - On mismatch, the server returns HTTP 400 "Host not allowed!".
+
+    DEV   builds:
+        - Host mismatch is logged as a warning but the request is still allowed.
+
+    BENCH builds:
+        - Host is logged for visibility but never enforced.
+
+TLS hostname verification:
+
+    - When TLS=1 (mutual TLS), TLS-layer hostname verification is enabled.
+    - When TLS=0, only HTTP-level Host checks (as above) apply.
+
+===============================================================================
+TESTING GUIDE (OPENSSL S_CLIENT EXAMPLES, PORT 443)
+===============================================================================
+
+All examples assume:
+
+    - Server listens on port 443.
+    - Server certificate:    cert.pem
+    - Server private key:    key.pem
+    - CA bundle on both sides: ca-cert.pem
+
+DEV mode, TLS=1 (mutual TLS, all logs enabled):
+
+    Build:
+
+        make PROD=0 TLS=1 LOG_ALL=1
+
+    Test:
+
+        openssl s_client -connect 127.0.0.1:443 \
+            -servername localhost \
+            -cert client-cert.pem -key client-key.pem \
+            -CAfile ca-cert.pem -crlf -tls1_3
+
+    HTTP request:
+
+        GET / HTTP/1.1
+        Host: localhost
+
+        <press Enter twice to complete headers>
+
+    Expected:
+
+        - TLS handshake succeeds if client certificate is valid and trusted.
+        - HTTP/1.1 200 OK is returned.
+        - If Host is not "localhost", a warning is logged, but request proceeds.
+
+PROD mode, TLS=1 (mutual TLS, strict host enforcement):
+
+    Build:
+
+        make PROD=1 TLS=1 WARN=1 INFO=1
+
+    Test:
+
+        openssl s_client -connect 127.0.0.1:443 \
+            -servername secure.lab.linux \
+            -cert client-cert.pem -key client-key.pem \
+            -CAfile ca-cert.pem -crlf -tls1_3
+
+    HTTP request:
+
+        GET / HTTP/1.1
+        Host: secure.lab.linux
+
+        <press Enter twice to complete headers>
+
+    Expected:
+
+        - TLS handshake succeeds only if:
+            * client-cert.pem chains to ca-cert.pem, and
+            * the server certificate SAN/CN matches "secure.lab.linux".
+        - HTTP/1.1 200 OK is returned.
+        - If Host does not match RV_ALLOWED_HOST, the server returns HTTP 400.
+
+BENCH mode, TLS=0 (server-auth TLS, minimal logging):
+
+    Build:
+
+        make BENCH=1 TLS=0 INFO=1
+
+    Test:
+
+        openssl s_client -connect 127.0.0.1:443 \
+            -servername 127.0.0.1 \
+            -CAfile ca-cert.pem -crlf -tls1_3
+
+    HTTP request:
+
+        GET / HTTP/1.1
+        Host: 127.0.0.1
+
+        <press Enter twice to complete headers>
+
+    Expected:
+
+        - TLS handshake succeeds using server certificate only.
+        - Client certificate is not requested.
+        - Host header is logged, but not enforced.
+
+Negative tests (expected failures):
+
+    1) Missing client certificate with TLS=1:
+        - Build with TLS=1.
+        - Run s_client without -cert/-key.
+        - Handshake must fail due to missing client auth.
+
+    2) Wrong -servername with TLS=1:
+        - Supply a name not present in server certificate SAN/CN.
+        - TLS hostname verification must fail.
+
+    3) Wrong Host header in PROD:
+        - Use Host different from RV_ALLOWED_HOST.
+        - Response must be HTTP 400 "Host not allowed!".
+
+===============================================================================
+RUNTIME SAFETY AND SHUTDOWN BEHAVIOR
+===============================================================================
+
+Signals and termination:
+
+    - SIGINT, SIGTERM, SIGQUIT, SIGTSTP are trapped.
+    - SIGTSTP (Ctrl+Z) is treated as a request to terminate, not to suspend.
+    - On termination, the server:
+        * shuts down the TLS connection,
+        * closes client and listening sockets,
+        * frees SSL objects and address info,
+        * logs a final termination message.
+
+Sandboxing (PROD and BENCH):
+
+    - The process should start with sufficient privileges to:
+        * bind port 443,
+        * chroot into a restricted directory (for example: /var/secure-tls-server),
+        * drop privileges to an unprivileged account (for example: www-data).
+
+    - Certificate and key files should be placed inside the chroot and owned
+      by root:root with strict permissions (for example: 750).
+
+DEV builds:
+
+    - No chroot or privilege drop is used (to simplify debugging).
+    - Sanitizers are enabled via Makefile flags (ASan, UBSan).
+
+===============================================================================
+SYSTEM PREREQUISITES AND WHY THEY ARE REQUIRED
+===============================================================================
+
+Compiler requirements:
+
+    Minimum required:
+        - GCC 13 and g++ 13 or newer.
+
+    Recommended:
+        - Install the latest stable GCC and g++ versions available in your
+          distribution repositories (for example: GCC 15 and g++ 15 if
+          available).
+
+    Rule:
+        - Choose a single GCC major version V >= 13 (for example 13 or 15)
+          and use that same V consistently in all commands below:
+              gcc-V, g++-V, /usr/bin/gcc-V, /usr/bin/g++-V.
+
+    Reason:
+        - This project uses C23 features and modern security hardening flags.
+          Earlier compilers (such as GCC 11 or below, commonly installed by
+          default in many systems) will fail during compilation or lack
+          required diagnostics.
+
+Check current GCC version:
+
+    gcc --version
+
+If gcc < 13, upgrade toolchain as follows. In all commands below, replace
+"<V>" with the major version you are installing (for example 13 or 15).
+
+Step 1: enable access to recent toolchains:
+
+    sudo apt install software-properties-common
+    sudo add-apt-repository ppa:ubuntu-toolchain-r/test
+    sudo apt update
+
+    software-properties-common:
+        - Provides add-apt-repository utility.
+    add-apt-repository / apt update:
+        - Enable and refresh the toolchain PPA for newer GCC.
+
+Step 2: install compilers and essential build tools (using your chosen <V>):
+
+    sudo apt install gcc-<V> g++-<V>
+    sudo apt install build-essential apt-file openssl libssl-dev
+    sudo apt-file update
+
+    gcc-<V>, g++-<V>:
+        - Required compilers (C23 features used in this project).
+        - Examples:
+            * Minimum: gcc-13 g++-13
+            * Newer:   gcc-15 g++-15 (if available on your system)
+    build-essential:
+        - Installs make, linker, and C runtime headers.
+    apt-file, apt-file update:
+        - Allows searching which package provides a missing header/library.
+    openssl:
+        - Provides openssl CLI tools (including s_client) for testing.
+    libssl-dev:
+        - Provides OpenSSL headers and libraries required for compilation.
+
+Step 3: select GCC <V> as the default compiler:
+
+    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-<V> 100
+    sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-<V> 100
+    sudo update-alternatives --config gcc
+
+    update-alternatives:
+        - Ensures gcc and g++ invoke the chosen GCC version <V> by default.
+        - Use the same <V> here that you installed in the previous step.
+
+Examples:
+
+    Minimum supported (V=13):
+
+        sudo apt install gcc-13 g++-13
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100
+
+    Newer toolchain (V=15, if available):
+
+        sudo apt install gcc-15 g++-15
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 100
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-15 100
+
+Optional: build a recent OpenSSL from source if system OpenSSL is too old:
+
+    mkdir ~/openssl_3_5
+    cd ~/openssl_3_5
+    wget https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz
+    tar xzvf openssl-3.5.4.tar.gz
+    cd openssl-3.5.4
+    ./config
+    make
+    sudo make install
+    openssl version -a
+
+Purpose:
+
+    - Guarantees a recent OpenSSL 3.x version with modern TLS 1.3 support.
+    - Avoids limitation of older distributions with outdated libssl.
+
+Troubleshooting system packages:
+
+    sudo apt list --upgradable
+    sudo apt full-upgrade
+
+    - Use these to bring system packages up to date.
+
+If apt repeatedly warns about snapd:
+
+    sudo apt-get --simulate install snapd
+    sudo apt-get install snapd
+
+    - These clear pending snapd-related upgrade warnings, if present.
+    - They do not affect the TLS server itself but keep the package manager
+      in a consistent state.
+
+Summary of installed packages and commands:
+
+    software-properties-common   -> Needed for add-apt-repository
+    add-apt-repository           -> Adds toolchain PPA for GCC upgrades
+    apt update                   -> Refreshes package index
+    gcc-<V>, g++-<V> (V >= 13)   -> Required compilers for C23 code
+    build-essential              -> Core build toolkit (make, ld, headers)
+    apt-file, apt-file update    -> Helps locate missing headers/libraries
+    openssl, libssl-dev          -> Runtime and development support for TLS
+    update-alternatives ...      -> Switches system to chosen GCC <V> by default
+    make / sudo make install     -> Builds and installs OpenSSL from source
+    openssl version -a           -> Verifies installed OpenSSL version
+    apt list / full-upgrade      -> Resolves outdated or missing packages
+    apt-get ... snapd            -> Cleans up snapd warnings if necessary
+
+===============================================================================
+DIRECT GCC BUILD (DEVELOPER ONLY, NOT HARDENED)
+===============================================================================
+
+The recommended way to build is via the Makefile, using one of the 34 valid
+make commands described above. Direct gcc commands should only be used for
+quick local tests.
+
+1) Simple functional test (no extra hardening):
+
+    gcc TCP_Server.c -o TCP_Server -lssl -lcrypto
+
+2) Closer to PROD-style warnings and optimisation:
+
+    gcc -std=c2x TCP_Server.c -o TCP_Server \
+        -Wall -Wextra -Werror -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -O2 \
+        -lssl -lcrypto
+
+These direct builds:
+
+    - Do NOT apply the full hardening that the Makefile adds.
+    - Do NOT enforce the same mode, logging, and host policies automatically.
+    - Should NOT be used for hardened deployment.
+
+For real deployments or benchmarks, always use the Makefile with a valid
+(PROD / DEV / BENCH, TLS, and logging) combination.
+
+===============================================================================
+@section security_compliance Security Compliance Summary (S16)
+===============================================================================
+
+This software is designed for hardened operational deployment only when built
+using the Makefile in a valid PROD or BENCH configuration with TLS enabled
+(TLS=1 or TLS=0). These Makefile builds apply:
+
+    - Full compiler and linker security hardening flags,
+    - Denial of DEBUG logging in production and benchmarking modes,
+    - Strict or logged HTTP Host enforcement, and
+    - Chroot and privilege drop requirements (PROD/BENCH only).
+
+DEBUG logging, unrestricted host acceptance, or the absence of privilege and
+filesystem isolation significantly reduces security posture. Therefore:
+
+    - Any build that enables DEBUG logging outside of DEV mode, or
+    - Any binary produced outside of Makefile enforcement,
+
+shall not be deployed or executed in an operational or production environment.
+
+DEV builds are permitted solely for development and troubleshooting and are not
+authorized for deployment. All production or benchmark usage must use a valid
+Makefile-controlled hardened build that meets the requirements above.
+
+===============================================================================
+END OF BUILD / TEST / SECURITY / SYSTEM REQUIREMENTS DOCUMENTATION
+===============================================================================
+*/
 
 static SSL_CTX* ctx = (SSL_CTX*)NULL;
 static SSL* ssl = (SSL*)NULL;
@@ -491,31 +1130,32 @@ static void SignalHandler_SetExitFlag(int signum)
  *
  * In MODE_SAN builds, we aggressively abort the process on unexpected OpenSSL
  * errors to surface issues under sanitizers as early as possible.
- */
+**/
 static void rvSanAbortOnOpenSSLError(const char* where, int ssl_err)
 {
 #if defined(MODE_SAN)
-    if ((SSL_ERROR_WANT_READ == ssl_err) ||
-        (SSL_ERROR_WANT_WRITE == ssl_err) ||
-        (SSL_ERROR_ZERO_RETURN == ssl_err))
-    {
-        return;
-    }
+	if ((SSL_ERROR_WANT_READ == ssl_err) ||
+		(SSL_ERROR_WANT_WRITE == ssl_err) ||
+		(SSL_ERROR_ZERO_RETURN == ssl_err))
+	{
+		return;
+	}
 
-    unsigned long ossl_err = ERR_peek_error();
-    if (ossl_err != 0UL) {
-        char buf[256];
-        ERR_error_string_n(ossl_err, buf, sizeof(buf));
-        LOG_ERROR("SAN MODE: OpenSSL error in %s (ssl_err=%d, ossl_err=%lu, msg=%s)",
-                  where, ssl_err, ossl_err, buf);
-    } else {
-        LOG_ERROR("SAN MODE: OpenSSL error in %s (ssl_err=%d)", where, ssl_err);
-    }
+	unsigned long ossl_err = ERR_peek_error();
+	if (ossl_err != 0UL) {
+		char buf[256];
+		ERR_error_string_n(ossl_err, buf, sizeof(buf));
+		LOG_ERROR("SAN MODE: OpenSSL error in %s (ssl_err=%d, ossl_err=%lu, msg=%s)",
+			where, ssl_err, ossl_err, buf);
+	}
+	else {
+		LOG_ERROR("SAN MODE: OpenSSL error in %s (ssl_err=%d)", where, ssl_err);
+	}
 
-    abort();
+	abort();
 #else
-    (void)where;
-    (void)ssl_err;
+	(void)where;
+	(void)ssl_err;
 #endif
 }
 
@@ -594,7 +1234,7 @@ static void rvShutDownSSL_AndCloseFD(void)
  *      sudo chown -R root:root /var/secure-tls-server
  *      sudo chmod -R 750 /var/secure-tls-server
  * ============================================================================
- */
+**/
 static bool rvDropPrivileges_AndChroot(void)
 {
 	bool ret = false;
@@ -865,17 +1505,17 @@ static bool InitializeServer(void)
 		{
 			LOG_ERROR("Failed to load CA certificate for mutual TLS");
 
-			#if defined(__DEV__) && defined(__LOG_ENABLE_DEBUG__)
-				ERR_print_errors_fp(stderr);
-			#endif
+#if defined(__DEV__) && defined(__LOG_ENABLE_DEBUG__)
+			ERR_print_errors_fp(stderr);
+#endif
 
-			#if !defined(__DEV__)
-				/* PROD/BENCH: fail silently, no OpenSSL internals leak */
-				break;
-			#else
-				/* DEV: fail securely with SAN panic */
-				rvSanAbortOnOpenSSLError("SSL_CTX_load_verify_locations", SSL_ERROR_SSL);
-			#endif
+#if !defined(__DEV__)
+			/* PROD/BENCH: fail silently, no OpenSSL internals leak */
+			break;
+#else
+			/* DEV: fail securely with SAN panic */
+			rvSanAbortOnOpenSSLError("SSL_CTX_load_verify_locations", SSL_ERROR_SSL);
+#endif
 		}
 		LOG_INFO("Mutual TLS enabled: verifying client certificates using ca-cert.pem");
 		/*
@@ -908,37 +1548,37 @@ static bool InitializeServer(void)
 		 * Fallback: TLS 1.2 (strong AEAD + PFS)
 		 */
 		if (1 != SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION) ||
-				1 != SSL_CTX_set_max_proto_version(ctx, TLS1_3_VERSION))
+			1 != SSL_CTX_set_max_proto_version(ctx, TLS1_3_VERSION))
 		{
-				LOG_ERROR("Failed to set TLS protocol range");
-				break;
+			LOG_ERROR("Failed to set TLS protocol range");
+			break;
 		}
 
 		/* Explicit TLS 1.3 cipher suites */
 		if (1 != SSL_CTX_set_ciphersuites(ctx,
-				"TLS_AES_256_GCM_SHA384:"
-				"TLS_AES_128_GCM_SHA256:"
-				"TLS_CHACHA20_POLY1305_SHA256"))
+			"TLS_AES_256_GCM_SHA384:"
+			"TLS_AES_128_GCM_SHA256:"
+			"TLS_CHACHA20_POLY1305_SHA256"))
 		{
-				LOG_ERROR("Failed to set TLS 1.3 ciphersuites");
-				break;
+			LOG_ERROR("Failed to set TLS 1.3 ciphersuites");
+			break;
 		}
 
 		/* Strong TLS 1.2 fallback */
 		if (1 != SSL_CTX_set_cipher_list(ctx,
-				"ECDHE-ECDSA-AES256-GCM-SHA384:"
-				"ECDHE-ECDSA-AES128-GCM-SHA256:"
-				"ECDHE-ECDSA-CHACHA20-POLY1305"))
+			"ECDHE-ECDSA-AES256-GCM-SHA384:"
+			"ECDHE-ECDSA-AES128-GCM-SHA256:"
+			"ECDHE-ECDSA-CHACHA20-POLY1305"))
 		{
-				LOG_ERROR("Failed to set TLS 1.2 cipher list");
-				break;
+			LOG_ERROR("Failed to set TLS 1.2 cipher list");
+			break;
 		}
 
 		/* Preferring ECDSA/ECDHE curves */
 		if (0 == SSL_CTX_set1_curves_list(ctx, "P-256:P-384"))
 		{
-				LOG_ERROR("Failed to set ECDHE curves");
-				break;
+			LOG_ERROR("Failed to set ECDHE curves");
+			break;
 		}
 
 		/* Address resolution for IPv4 / IPv6 */
