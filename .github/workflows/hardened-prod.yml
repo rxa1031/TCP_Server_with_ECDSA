@@ -1,21 +1,15 @@
 name: Hardened PROD Build
-
 # -----------------------------------------------------------------------------
-# README Badge for this workflow:
+# README Badge:
+#   [![Hardened PROD Build](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/hardened-prod.yml/badge.svg)](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/hardened-prod.yml)
 #
-# Add the below line to your README.md to display hardened build status:
-#
-# [![Hardened PROD Build](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/hardened-prod.yml/badge.svg)](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/hardened-prod.yml)
-#
-# Replace the GitHub org and repo name if you fork this project.
-# -----------------------------------------------------------------------------
-
 # This workflow enforces the strictest security settings:
-#  - PROD Mode ONLY
-#  - mTLS enforced
-#  - Certificate Revocation >= 1
-#  - Debug logging prohibited
-#  - No SKIP_SECURITY allowed
+#   - PROD / BENCH hardened mode
+#   - mTLS enforced (by Makefile defaults)
+#   - Certificate Revocation >= 1
+#   - Debug logging prohibited in hardened paths
+#   - No SKIP_SECURITY allowed
+# -----------------------------------------------------------------------------
 
 on:
   push:
@@ -36,10 +30,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential libssl-dev
 
-      - name: Make test script executable
-        run: chmod +x ./test_builds.sh
-
-      # Explicitly enforce hardened PROD mode rules
+      # Explicitly enforce hardened PROD/BENCH build
       - name: Hardened PROD build
         run: |
           make clean
