@@ -1,142 +1,192 @@
-CC      := gcc
+CC := gcc
 
 # =====================================================================
-# Build Options:
-#   make                    : PROD (Hardened) build        → PROD=1 (default)
-#   make PROD=0             : DEV build (sanitizers + selectable logging)
-#   make BENCH=1            : BENCH build (hardened + optimized)
+# TTY-aware ANSI Colors (disabled when piping/redirecting)
+# =====================================================================
+ifneq ("$(shell tty 2>/dev/null)","")
+Y  := $(shell printf "\033[33m")
+G  := $(shell printf "\033[32m")
+C  := $(shell printf "\033[36m")
+R  := $(shell printf "\033[31m")
+RS := $(shell printf "\033[0m")
+else
+Y  :=
+G  :=
+C  :=
+R  :=
+RS :=
+endif
+
+# =====================================================================
+# Build Modes
+# =====================================================================
+# make                → PROD (Hardened default)
+# make PROD=0         → DEV  (Sanitizers + full logs)
+# make BENCH=1        → BENCH (Performance hardened)
 #
-# Host Enforcement (per-mode defaults, override via make):
-#   PROD_HOST  (default: secure.lab.linux)
-#   DEV_HOST   (default: localhost)
-#   BENCH_HOST (default: 127.0.0.1)
-#
-# Logging overrides:
-#   make LOG_ALL=1         : Enable WARN + INFO only
-#   make WARN=1
-#   make INFO=1
-#   make DEBUG=1           : Only allowed when PROD=0 (DEV mode)
-#
+# PROD  = strict security (mTLS + Host + Revocation)
+# DEV   = relaxed for debugging
+# BENCH = PROD + performance tests (reduced logging)
 # =====================================================================
 
-PROD    ?= 1
-BENCH   ?= 0
-TLS     ?= 1
-WARN    ?= 0
-INFO    ?= 0
-DEBUG   ?= 0
-LOG_ALL ?= 0
-
-PROD_HOST  ?= secure.lab.linux
-DEV_HOST   ?= localhost
-BENCH_HOST ?= 127.0.0.1
+PROD  ?= 1
+BENCH ?= 0
 
 # =====================================================================
-# Build Mode Safety Enforcement (HARD FAIL)
+# mTLS / Certificate Revocation
 # =====================================================================
+mTLS       ?= 1  # mTLS=0 → DEV only
+REVOCATION ?= 1  # 0 = Disabled, 1 = CRL, 2 = CRL+OCSP
 
-# DEV and BENCH must not be enabled together
-ifeq ($(PROD),0)
-ifeq ($(BENCH),1)
-$(error DEV (PROD=0) and BENCH=1 cannot be enabled together)
+ifeq ($(REVOCATION),0)
+REVOCATION_DESC := 0 (DISABLED – DEV only unless SKIP_SECURITY=1)
+else ifeq ($(REVOCATION),1)
+REVOCATION_DESC := 1 (CRL only – hard fail)
+else ifeq ($(REVOCATION),2)
+REVOCATION_DESC := 2 (CRL+OCSP – highest assurance)
+else
+REVOCATION_DESC := $(REVOCATION) (UNKNOWN – verify input)
 endif
-endif
-
-# If DEBUG=1 requested outside DEV → reject
-ifeq ($(DEBUG),1)
-ifneq ($(PROD),0)
-$(error DEBUG logging is only allowed in DEV builds. Use: make PROD=0 DEBUG=1)
-endif
-endif
-
-# BENCH mode always implies PROD hardened build
-ifeq ($(BENCH),1)
-PROD := 1
-endif
-
-# If neither DEV nor BENCH selected → PROD default remains
-# (PROD is already default 1)
 
 # =====================================================================
 # Logging Configuration
 # =====================================================================
+WARN  ?= 0
+INFO  ?= 0
+DEBUG ?= 0
 
-# LOG_ALL convenience: WARN + INFO ONLY
-ifeq ($(LOG_ALL),1)
-    WARN := 1
-    INFO := 1
+# =====================================================================
+# Host and Port Defaults
+# =====================================================================
+PROD_HOST  ?= secure.lab.linux
+DEV_HOST   ?= localhost
+BENCH_HOST ?= 127.0.0.1
+
+PROD_PORT  ?= 443
+BENCH_PORT ?= 443
+DEV_PORT   ?= 8443
+
+# =====================================================================
+# Security Enforcement: Prevent insecure builds unless overridden
+# =====================================================================
+SKIP_SECURITY ?= 0
+
+ifeq ($(BENCH),1)
+PROD := 1
 endif
 
-LOG_DEFS :=
+ifeq ($(SKIP_SECURITY),0)
 
-ifeq ($(WARN),1)
-    LOG_DEFS += -D__LOG_ENABLE_WARN__
+ifneq ($(PROD),0)
+ifeq ($(mTLS),0)
+$(error $(R)Invalid: mTLS=0 allowed only in DEV$(RS))
 endif
-
-ifeq ($(INFO),1)
-    LOG_DEFS += -D__LOG_ENABLE_INFO__
+ifeq ($(REVOCATION),0)
+$(error $(R)Invalid: REVOCATION=0 blocked in PROD/BENCH$(RS))
+endif
 endif
 
 ifeq ($(DEBUG),1)
-    LOG_DEFS += -D__LOG_ENABLE_DEBUG__
+ifeq ($(BENCH),1)
+$(error $(R)Invalid: DEBUG not allowed in BENCH$(RS))
+endif
+ifneq ($(PROD),0)
+$(error $(R)Invalid: DEBUG allowed only in DEV$(RS))
+endif
+endif
+
+endif # SKIP_SECURITY
+
+# =====================================================================
+# Certificate Requirement (Hardened Only)
+# =====================================================================
+ifeq ($(SKIP_SECURITY),0)
+ifneq ($(PROD),0)
+CERT_FILES := \
+	certs/server-cert.pem \
+	certs/server-key.pem \
+	certs/ca-server-cert.pem
+
+$(foreach f,$(CERT_FILES), \
+	$(if $(wildcard $(f)),, \
+		$(error Missing required certificate: $(f))))
+endif
 endif
 
 # =====================================================================
-# Mode Selection: BENCH → DEV → PROD
+# Logging Macro Flags
 # =====================================================================
+LOG_DEFS := -D__LOG_ENABLE_ERROR__
 
+ifneq ($(filter 1,$(WARN) $(INFO) $(DEBUG)),)
+ifneq ($(WARN),0)  ; LOG_DEFS += -D__LOG_ENABLE_WARN__ ; endif
+ifneq ($(INFO),0)  ; LOG_DEFS += -D__LOG_ENABLE_INFO__ ; endif
+ifneq ($(DEBUG),0) ; LOG_DEFS += -D__LOG_ENABLE_DEBUG__ ; endif
+endif
+
+# =====================================================================
+# Build Mode Selection
+# =====================================================================
 ifeq ($(BENCH),1)
-	MODE_FLAGS    := -D__BENCH__
-	MODE_MSG      := Mode: BENCH (Performance Testing)
-	CFLAGS_EXTRA  := -O2 -pipe
-	LDFLAGS_EXTRA :=
-	HOST_DEF      := -DRV_ALLOWED_HOST=\"$(BENCH_HOST)\"
-	HOST_MSG      := Host (BENCH): $(BENCH_HOST)
+MODE_FLAGS   := -D__BENCH__
+MODE_MSG     := BENCH hardened
+CFLAGS_EXTRA := -O2 -pipe -fstack-clash-protection -DNDEBUG
+HOST         := $(BENCH_HOST)
+PORT         := $(BENCH_PORT)
 
 else ifeq ($(PROD),0)
-	MODE_FLAGS    := -D__DEV__
-	MODE_MSG      := Mode: DEV (Debug + Sanitizers)
-	CFLAGS_EXTRA  := -g3 -O0 -fsanitize=address,undefined
-	LDFLAGS_EXTRA := -fsanitize=address,undefined
-	HOST_DEF      := -DRV_ALLOWED_HOST=\"$(DEV_HOST)\"
-	HOST_MSG      := Host (DEV):   $(DEV_HOST)
+MODE_FLAGS   := -D__DEV__
+MODE_MSG     := DEV build (debug)
+CFLAGS_EXTRA := -g3 -O0 -fsanitize=address,undefined,leak -fno-omit-frame-pointer
+HOST         := $(DEV_HOST)
+PORT         := $(DEV_PORT)
+
+ifeq ($(filter 1,$(WARN) $(INFO) $(DEBUG)),)
+WARN=1 ; INFO=1 ; DEBUG=1
+LOG_DEFS += -D__LOG_ENABLE_WARN__ -D__LOG_ENABLE_INFO__ -D__LOG_ENABLE_DEBUG__
+endif
 
 else
-	MODE_FLAGS    :=
-	MODE_MSG      := Mode: PROD (Hardened Default)
-	CFLAGS_EXTRA  := -O2 -pipe
-	LDFLAGS_EXTRA :=
-	HOST_DEF      := -DRV_ALLOWED_HOST=\"$(PROD_HOST)\"
-	HOST_MSG      := Host (PROD):  $(PROD_HOST)
+MODE_FLAGS   :=
+MODE_MSG     := PROD hardened
+CFLAGS_EXTRA := -O2 -pipe -fstack-clash-protection -DNDEBUG
+HOST         := $(PROD_HOST)
+PORT         := $(PROD_PORT)
 endif
 
 # =====================================================================
-# Mutual TLS Selection
+# mTLS Macro Declaration
 # =====================================================================
-
-ifeq ($(TLS),1)
-	TLS_MSG  := Mutual TLS: ENABLED
-	DEFS_TLS := -D__ENABLE_MUTUAL_TLS__
+ifeq ($(mTLS),1)
+mTLS_MSG  := mTLS: ON
+DEFS_mTLS := -D__REQUIRE_MUTUAL_TLS__
 else
-	TLS_MSG  := Mutual TLS: DISABLED
-	DEFS_TLS := -U__ENABLE_MUTUAL_TLS__
+mTLS_MSG  := mTLS: OFF (DEV only)
+DEFS_mTLS := -U__REQUIRE_MUTUAL_TLS__
 endif
 
 # =====================================================================
-# Detect C23 support
+# Security Override Handling
 # =====================================================================
-
-CHECK_C23 := $(shell printf "int main(){}" | $(CC) -std=c23 -xc - -o /dev/null 2>/dev/null && echo yes || echo no)
-ifeq ($(CHECK_C23),yes)
-	CSTD := -std=c23
-else
-	CSTD := -std=c2x
+ifeq ($(SKIP_SECURITY),1)
+CFLAGS_EXTRA += -DSKIP_SECURITY
+HOST          := insecure.local
 endif
 
-# =====================================================================
-# Security Hardening Flags
-# =====================================================================
+# Apply host/port after override
+HOST_DEF        := -D__ALLOWED_HOST__=\"$(HOST)\"
+PORT_DEF        := -D__TLS_PORT__=$(PORT)
+REVOCATION_DEFS := -D__REVOCATION_LEVEL__=$(REVOCATION)
 
+# =====================================================================
+# C Standard Detection
+# =====================================================================
+CHECK_C23 := $(shell printf "int main(){}" | $(CC) -std=c23 -xc - -o /dev/null 2>/dev/null && echo yes)
+CSTD      := $(if $(CHECK_C23),-std=c23,-std=c2x)
+
+# =====================================================================
+# Hardening Flags
+# =====================================================================
 CFLAGS_BASE := \
 	$(CSTD) \
 	-Wall -Wextra -Werror -Wpedantic \
@@ -146,32 +196,68 @@ CFLAGS_BASE := \
 	-D_FORTIFY_SOURCE=2 \
 	-fstack-protector-strong -fPIE
 
-CFLAGS  := $(CFLAGS_BASE) $(CFLAGS_EXTRA) $(MODE_FLAGS) $(DEFS_TLS) $(LOG_DEFS) $(HOST_DEF)
-LDFLAGS := -lssl -lcrypto -pie $(LDFLAGS_EXTRA)
+LDFLAGS_BASE := \
+	-lssl -lcrypto \
+	-pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
 
-TARGET  := TCP_Server
-SRCS    := TCP_Server.c
-PREFIX  := /usr/local/bin
+ifeq ($(PROD),1)
+LDFLAGS_BASE += -Wl,-z,defs
+endif
+
+CFLAGS  := $(CFLAGS_BASE) $(CFLAGS_EXTRA) $(MODE_FLAGS) $(DEFS_mTLS) $(LOG_DEFS) $(HOST_DEF) $(PORT_DEF) $(REVOCATION_DEFS)
+LDFLAGS := $(LDFLAGS_BASE)
 
 # =====================================================================
-# Build
+# Sources / Output Directory
 # =====================================================================
+BUILD_DIR := build
+TARGET    := $(BUILD_DIR)/mtls_server
+SRCS      := src/mtls_server.c
 
+# =====================================================================
+# Build Summary + Binary Build
+# =====================================================================
 all: $(TARGET)
-	@echo "Using GCC: $$($(CC) --version | head -n 1)"
-	@echo "$(MODE_MSG)"
-	@echo "$(TLS_MSG)"
-	@echo "Logging Flags: $(LOG_DEFS)"
-	@echo "$(HOST_MSG)"
-	@echo "C Standard: $(CSTD)"
-	@echo "OpenSSL: $$(openssl version 2>/dev/null || echo not found)"
+	@echo "$(Y)---------------- BUILD SUMMARY ----------------$(RS)"
+	@echo "Mode:         $(MODE_MSG)"
+	@echo "$(mTLS_MSG)"
+	@echo "Revocation:   $(REVOCATION_DESC)"
+	@echo "Logging:      ERROR=1 WARN=$(WARN) INFO=$(INFO) DEBUG=$(DEBUG)"
+	@echo "Host:         $(HOST)"
+	@echo "Port:         $(PORT)"
+	@echo "Output:       $(TARGET)"
+	@echo "C Standard:   $(CSTD)"
+ifeq ($(SKIP_SECURITY),1)
+	@echo "$(R)*** WARNING: SKIP_SECURITY ENABLED (INSECURE BUILD) ***$(RS)"
+endif
+	@echo "$(Y)------------------------------------------------$(RS)"
 
 $(TARGET): $(SRCS)
+	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET) $(LDFLAGS)
 
-install: $(TARGET)
-	install -m 755 $(TARGET) $(PREFIX)
-	@echo "Installed to: $(PREFIX)"
+# =====================================================================
+# Help — also responds to `make ?`
+# =====================================================================
+.PHONY: help ?
+? : help
 
+help:
+	@echo "$(Y)==================== Build Help ====================$(RS)"
+	@echo "make             → PROD hardened build"
+	@echo "make PROD=0      → DEV build (sanitizers + logs)"
+	@echo "make BENCH=1     → BENCH hardened (performance)"
+	@echo ""
+	@echo "$(G)Logging Controls:$(RS)"
+	@echo "WARN=1 INFO=1 DEBUG=1 as needed"
+	@echo ""
+	@echo "SECURITY OVERRIDE (CI only):"
+	@echo "SKIP_SECURITY=1 make PROD=1 REVOCATION=0"
+	@echo "$(Y)====================================================$(RS)"
+
+# =====================================================================
+# Clean
+# =====================================================================
+.PHONY: clean
 clean:
-	rm -f $(TARGET)
+	rm -rf $(BUILD_DIR)
