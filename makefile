@@ -275,6 +275,9 @@ SRCS      := src/mtls_server.c
 all: $(TARGET)
 	@echo "$(Y)---------------- BUILD SUMMARY ----------------$(RS)"
 	@echo "Mode:         $(MODE_MSG)"
+ifeq ($(BENCH),1)
+	@echo "$(Y)Note: Logs in BENCH may impact precise timing results.$(RS)"
+endif
 	@echo "$(mTLS_MSG)"
 	@echo "Revocation:   $(REVOCATION_DESC)"
 	@echo "Logging:      ERROR=1 WARN=$(WARN) INFO=$(INFO) DEBUG=$(DEBUG)"
@@ -304,6 +307,7 @@ endif
 	@echo "  1   = Enabled always"
 	@echo "  0   = Disabled always"
 	@echo "  opt = Optional (must enable explicitly)"
+	@echo "        OFF by default in BENCH/PROD; enable explicitly (e.g., WARN=1 or INFO=1)"
 	@echo "  d=1 = Auto-enabled in DEV when no log flags set"
 	@echo ""
 
@@ -322,6 +326,7 @@ help:
 	@echo "make             → PROD hardened build (TLS + mTLS + revocation)"
 	@echo "make PROD=0      → DEV build (TLS-only, mTLS optional, sanitizers + logs)"
 	@echo "make BENCH=1     → BENCH hardened (TLS + mTLS, performance focus)"
+	@echo "                  $(Y)Note: Logs in BENCH may impact precise timing results.$(RS)"
 	@echo ""
 	@echo "$(G)mTLS / Revocation:$(RS)"
 	@echo "  mTLS=1 (default) → mutual TLS (client cert required)"
@@ -337,6 +342,9 @@ help:
 	@echo "  Mode   ERROR INFO WARN DEBUG"
 	@echo "  PROD    1     opt  opt   0"
 	@echo "  BENCH   1     opt  opt   0"
+ifeq ($(BENCH),1)
+	@echo "$(Y)Note: WARN/INFO enabled in BENCH can influence benchmark accuracy.$(RS)"
+endif
 	@echo "  DEV     1     d=1  d=1  d=1"
 	@echo ""
 	# ⚠ POLICY REQUIREMENT — DO NOT REMOVE
@@ -346,6 +354,7 @@ help:
 	@echo "  1   = Enabled always"
 	@echo "  0   = Disabled always"
 	@echo "  opt = Optional; enable with WARN=1 or INFO=1"
+	@echo "        OFF by default in BENCH/PROD; enable explicitly (e.g., WARN=1 or INFO=1)"
 	@echo "  d=1 = Auto-enabled in DEV when no log flags set"
 	@echo ""
 	@echo "$(G)Sanitizers (DEV only):$(RS)"
