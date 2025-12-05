@@ -280,7 +280,7 @@ ifeq ($(BENCH),1)
 endif
 	@echo "$(mTLS_MSG)"
 	@echo "Revocation:   $(REVOCATION_DESC)"
-	@echo "Logging:      ERROR=1 WARN=$(WARN) INFO=$(INFO) DEBUG=$(DEBUG)"
+	@echo "Logging:      ERROR=$(G)1$(RS) WARN=$(WARN) INFO=$(INFO) DEBUG=$(DEBUG)"
 	@echo "Host:         $(HOST)"
 	@echo "Port:         $(PORT)"
 	@echo "Output:       $(TARGET)"
@@ -341,10 +341,7 @@ help:
 	@echo "$(G)Logging (ASCII Matrix):$(RS)"
 	@echo "  Mode   ERROR INFO WARN DEBUG"
 	@echo "  PROD    1     opt  opt   0"
-	@echo "  BENCH   1     opt  opt   0"
-ifeq ($(BENCH),1)
-	@echo "$(Y)Note: WARN/INFO enabled in BENCH can influence benchmark accuracy.$(RS)"
-endif
+	@echo "  BENCH   1     opt  opt   0   ($(Y)Enabling logs may affect timing$(RS))"
 	@echo "  DEV     1     d=1  d=1  d=1"
 	@echo ""
 	# ⚠ POLICY REQUIREMENT — DO NOT REMOVE
