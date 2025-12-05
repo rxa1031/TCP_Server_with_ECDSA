@@ -41,9 +41,16 @@ if [ -t 1 ]; then
   RED="\033[31m"
   YELLOW="\033[33m"
   BLUE="\033[34m"
+  # High-contrast FAIL: red foreground on white background
+  FAIL_COLOR="\033[31m\033[47m"
   RESET="\033[0m"
 else
-  GREEN=""; RED=""; YELLOW=""; BLUE=""; RESET=""
+  GREEN=""
+  RED=""
+  YELLOW=""
+  BLUE=""
+  FAIL_COLOR=""
+  RESET=""
 fi
 
 echo "============================================"
@@ -69,7 +76,7 @@ write_json_report() {
     # SKIP_SECURITY override detection
     local skip_security="0"
     # SKIP_SECURITY override detection: Make cmd + GCC defines
-	if echo "$gcc_cmd $cmd" | grep -q "SKIP_SECURITY=1"; then
+    if echo "$gcc_cmd $cmd" | grep -q "SKIP_SECURITY=1"; then
         skip_security="1"
     fi
 
@@ -81,12 +88,12 @@ write_json_report() {
     rev_level=$(echo "$gcc_cmd" | sed -n 's/.*-D__REVOCATION_LEVEL__=\([0-9]*\).*/\1/p')
 
     # Revocation description (aligned to DefStan views)
-	case "$rev_level" in
-		0) rev_desc="0 — Revocation checks disabled (DEV/override only)" ;;
-		1) rev_desc="1 — CRL required (Hardened configuration requirement)" ;;
-		2) rev_desc="2 — CRL + OCSP required (Highest security assurance)" ;;
-		*) rev_desc="Unset — Makefile failed to specify a policy level" ;;
-	esac
+    case "$rev_level" in
+        0) rev_desc="0 — Revocation disabled (DEV/override only)" ;;
+        1) rev_desc="1 — CRL required (Hardened configuration requirement)" ;;
+        2) rev_desc="2 — CRL + OCSP required (Highest security assurance)" ;;
+        *) rev_desc="Unset — Makefile failed to specify a policy level" ;;
+    esac
 
     local json_file="$JSON_DIR/${name}.json"
     cat > "$json_file" <<EOF
@@ -114,15 +121,15 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
-# Security Policy Detail Helper (Makefile + GCC enforcement triggers)
+# Security Policy Detail Helper
 # -----------------------------------------------------------------------------
 detect_policy_category() {
     local src="$1"
 
-    if echo "$src" | grep -qE "mTLS=0|-D__ENABLE_MUTUAL_TLS__=0"; then
+    if echo "$src" | grep -qE "mTLS=0|-U__REQUIRE_MUTUAL_TLS__"; then
         echo "Mutual TLS Client Certificate Enforcement"
     elif echo "$src" | grep -qE "REVOCATION=0|-D__REVOCATION_LEVEL__=0"; then
-        echo "TLS Certificate Revocation Enforcement"
+        echo "Certificate Revocation Policy Enforcement"
     elif echo "$src" | grep -qE "DEBUG=1|__LOG_ENABLE_DEBUG__"; then
         echo "Secure Logging Policy (PROD debug restricted)"
     else
@@ -131,7 +138,7 @@ detect_policy_category() {
 }
 
 # -----------------------------------------------------------------------------
-# Build Counters for final Compliance Summary
+# Build Counters
 # -----------------------------------------------------------------------------
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -156,17 +163,25 @@ test_case() {
         echo -e "${GREEN}${PASS_ICON} [PASS] – Build succeeded${RESET}"
     else
         # Blocked or unexpected fail
-        if grep -qiE "Invalid:|POLICY BLOCK|SECURITY BLOCK" "$log"; then
+        if grep -qiE "(Invalid:|Missing required certificate)" "$log"; then
             result="CORRECT-FAIL"
             CORRECT_FAIL_COUNT=$((CORRECT_FAIL_COUNT+1))
             echo -e "${YELLOW}[CORRECT-FAIL]${RESET} ${POLICY_ICON} Enforcement Triggered"
-            echo "Reason: $(grep 'Invalid:' "$log" | sed 's/.*Invalid: //')"
+            # Provide a reason for both Invalid: and Missing required certificate
+            if grep -qi "Invalid:" "$log"; then
+                echo "Reason: $(grep 'Invalid:' "$log" | sed 's/.*Invalid: //')"
+            elif grep -qi "Missing required certificate" "$log"; then
+                echo "Reason: $(grep -i 'Missing required certificate' "$log" | head -1)"
+            else
+                echo "Reason: Policy enforcement triggered (see log for details)"
+            fi
             echo "Policy Category: $(detect_policy_category "$cmd")"
             echo "---- Policy Enforcement Verified ----"
         else
             result="FAIL"
             FAIL_COUNT=$((FAIL_COUNT+1))
-            echo -e "${RED}${FAIL_ICON} [FAIL] – Unexpected build failure${RESET}"
+            # High-contrast FAIL here
+            echo -e "${FAIL_COLOR}${FAIL_ICON} [FAIL] – Unexpected build failure${RESET}"
             echo "--- Compiler/Build Output ---"
             cat "$log"
             echo "----------------------------"
@@ -176,12 +191,18 @@ test_case() {
     local gcc_cmd
     gcc_cmd=$(grep -oE '(^| )gcc(-[0-9]+)? [^"]*' "$log" | tail -1 || true)
 
+    # Optional visibility if we never reached the compile phase
+    if [ -z "$gcc_cmd" ]; then
+        echo -e "${YELLOW}Warning:${RESET} No GCC command found in log (build may have failed before compilation)."
+    fi
+
     # default is PROD
-	local mode="PROD"
-	if [ -n "$gcc_cmd" ]; then
-		if [[ "$gcc_cmd" =~ -D__DEV__ ]]; then mode="DEV"
-		elif [[ "$gcc_cmd" =~ -D__BENCH__ ]]; then mode="BENCH"; fi
-	fi
+    local mode="PROD"
+    if [[ "$gcc_cmd" =~ -D__DEV__ ]]; then
+        mode="DEV"
+    elif [[ "$gcc_cmd" =~ -D__BENCH__ ]]; then
+        mode="BENCH"
+    fi
 
     # Logging macro detection
     local log_error="0" log_warn="0" log_info="0" log_debug="0"
@@ -215,9 +236,11 @@ test_case "dev_warn"             "make PROD=0 WARN=1"
 test_case "dev_debug"            "make PROD=0 DEBUG=1"
 test_case "bench_rev1"           "make BENCH=1 REVOCATION=1"
 test_case "bench_warn_rev1"      "make BENCH=1 WARN=1 REVOCATION=1"
-# Additional allowed assurance configurations
+test_case "dev_san_failfast"     "make PROD=0 SANITIZER_FAIL_FAST=1"
 test_case "prod_info"            "make INFO=1"
 test_case "dev_rev2"             "make PROD=0 REVOCATION=2"
+test_case "invalid_host_prod"    "make HOST=evil.com"
+test_case "invalid_host_bench"   "make BENCH=1 HOST=evil.com"
 
 echo "----- Testing Blocked Builds -----"
 test_case "rev0"                 "make REVOCATION=0"
@@ -241,7 +264,8 @@ echo "Blocked builds:        $CORRECT_FAIL_COUNT CORRECT-FAIL"
 if [ $FAIL_COUNT -eq 0 ]; then
     echo -e "Audit Compliance:      ${GREEN}FULLY COMPLIANT ✔${RESET}"
 else
-    echo -e "Audit Compliance:      ${RED}NON-COMPLIANT ✘${RESET}"
+    # Also high-contrast for NON-COMPLIANT summary
+    echo -e "Audit Compliance:      ${FAIL_COLOR}NON-COMPLIANT ✘${RESET}"
 fi
 echo "============================================================"
 echo "Logs:  $BUILD_LOG_DIR/"
