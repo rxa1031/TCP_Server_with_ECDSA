@@ -1,0 +1,47 @@
+name: Build Validation
+
+# -----------------------------------------------------------------------------
+# README Badge:
+# Add the below line to your README.md to display build status:
+#
+# [![Build Validation](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/build-validation.yml/badge.svg)](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/build-validation.yml)
+#
+# Replace the GitHub org and repo names if you fork this project.
+# -----------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-validation:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout repository code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Install OpenSSL development libs + build tools
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev
+
+      # Ensure test script is executable
+      - name: Make test_builds.sh executable
+        run: chmod +x ./test_builds.sh
+
+      # Run the full build validation matrix
+      - name: Run build validation
+        run: ./test_builds.sh
+
+      # Save build logs as workflow artifacts (useful for audits)
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: build_logs/

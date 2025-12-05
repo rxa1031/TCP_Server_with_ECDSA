@@ -1,0 +1,54 @@
+name: Hardened PROD Build
+
+# -----------------------------------------------------------------------------
+# README Badge for this workflow:
+#
+# Add the below line to your README.md to display hardened build status:
+#
+# [![Hardened PROD Build](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/hardened-prod.yml/badge.svg)](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/hardened-prod.yml)
+#
+# Replace the GitHub org and repo name if you fork this project.
+# -----------------------------------------------------------------------------
+
+# This workflow enforces the strictest security settings:
+#  - PROD Mode ONLY
+#  - mTLS enforced
+#  - Certificate Revocation >= 1
+#  - Debug logging prohibited
+#  - No SKIP_SECURITY allowed
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  hardened-prod:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev
+
+      - name: Make test script executable
+        run: chmod +x ./test_builds.sh
+
+      # Explicitly enforce hardened PROD mode rules
+      - name: Hardened PROD build
+        run: |
+          make clean
+          make BENCH=1 REVOCATION=1
+
+      # Upload logs only if enforcement fails
+      - name: Upload hardened build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardened-build-logs
+          path: build_logs/
