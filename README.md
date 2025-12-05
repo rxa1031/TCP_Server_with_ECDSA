@@ -2,6 +2,25 @@
 All third-party components remain under their original licenses.
 See the [LICENSE](LICENSE) file for full license text.
 
+## Build Mode + Logging Enforcement Rules (Policy v1.0)
+
+| Mode  | TLS | mTLS | Sanitizers | ERROR | WARN | INFO | DEBUG |
+|-------|-----|------|------------|-------|------|------|-------|
+| PROD  | ✔   | ✔    | ❌         | ✔     | opt  | opt  | ❌    |
+| DEV   | ✔   | opt  | ✔ (Opt-B)  | ✔     | ✔    | ✔    | ✔     |
+| BENCH | ✔   | opt  | ❌         | ✔     | ❌    | ❌    | ❌    |
+
+### Mandatory Hard Rules
+
+- TLS can **never** be disabled
+- mTLS **must** be enabled in hardened builds (PROD/BENCH)
+- **DEBUG is forbidden** in PROD and BENCH builds
+- **BENCH = ERROR-only**
+- Sanitizers only permitted in DEV mode
+
+Any change that violates these rules **must be rejected automatically**  
+and flagged as a **policy violation**.
+
 # TCP_Server_with_ECDSA
 
 [![Build Validation](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/build-validation.yml/badge.svg)](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/build-validation.yml)
