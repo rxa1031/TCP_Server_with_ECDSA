@@ -125,10 +125,6 @@ __SKIP_SECURITY__ ?= 0
 # =============================================================================
 # Always allow cleaning — bypass *all* security enforcement
 # =============================================================================
-ifneq ($(filter clean,$(MAKECMDGOALS)),)
-  __SKIP_SECURITY__ := 1
-  PROD := 0
-endif
 ifneq ($(filter clean help ?,$(MAKECMDGOALS)),)
   __SKIP_SECURITY__ := 1
   PROD := 0
@@ -370,17 +366,13 @@ help:
 	@echo ""
 	@# ⚠ POLICY REQUIREMENT — DO NOT REMOVE
 	@# Policy Legend v1.5 — mTLS Policy Finalized (TLS always ON)
-	@echo "Legend: 1=always enabled, 0=disabled, opt=optional, d=1 auto-enabled in DEV"
-	@echo ""
+	@# Only incorrect information may be removed or corrected — do not delete this block
 	@echo "$(G)Logging (ASCII Matrix):$(RS)"
 	@echo "  Mode   ERROR INFO WARN DEBUG"
 	@echo "  PROD    1     opt  opt   0"
 	@echo "  BENCH   1     opt  opt   0"
 	@echo "  DEV     1     d=1  d=1   d=1"
 	@echo ""
-	@# ⚠ POLICY REQUIREMENT — DO NOT REMOVE
-	@# Policy Legend v1.5 — mTLS Policy Finalized (TLS always ON)
-	@# Only incorrect information may be removed or corrected — do not delete this block
 	@echo "Legend:"
 	@echo "  1   = Enabled always"
 	@echo "  0   = Disabled always"
