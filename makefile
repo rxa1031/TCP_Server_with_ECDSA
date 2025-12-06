@@ -265,8 +265,7 @@ endif
 
 # Apply host/port + revocation macros after override
 HOST_DEF        := -D__ALLOWED_HOST__=\"$(HOST)\"
-PORT_DEF        := -D__TLS_PORT__=$(PORT) \
-                   -D__TLS_PORT_STR__=\"$(PORT)\"
+PORT_DEF        := -D__TLS_PORT__=$(PORT) -D__TLS_PORT_STR__=\"$(PORT)\"
 REVOCATION_DEFS := -D__REVOCATION_LEVEL__=$(REVOCATION)
 
 # =============================================================================
@@ -315,7 +314,7 @@ ifeq ($(BENCH),1)
 	@echo "$(Y)Note: BENCH hardened — logs may impact timing tests$(RS)"
 endif
 	@echo "$(mTLS_MSG)"
-	@echo "Revocation:   $(REVOCATION_DESC)"
+	@echo "Revocation:   Level $(REVOCATION) → CRL=$$([[ $(REVOCATION) -ge 1 ]] && echo ON || echo OFF), OCSP=$$([[ $(REVOCATION) -ge 2 ]] && echo ON || echo OFF)"
 	@echo "Logging:      ERROR=$(G)1$(RS) WARN=$(Y)$(WARN)$(RS) INFO=$(C)$(INFO)$(RS) DEBUG=$(R)$(DEBUG)$(RS)"
 	@echo "Host:         $(HOST)"
 	@echo "Port:         $(PORT)"
@@ -351,11 +350,11 @@ help:
 	@echo "$(G)mTLS / Revocation:$(RS)"
 	@echo "  mTLS=1 (default) → require client cert"
 	@echo "  mTLS=0 → DEV only (server-auth TLS)"
-	@echo "  REVOCATION=1 (default) → CRL policy"
-	@echo "  REVOCATION=2 → CRL+OCSP future mode"
-	@echo "  REVOCATION=0 → DEV only / __SKIP_SECURITY__ override"
+	@echo "  REVOCATION=1 (default) → CRL policy (hardened baseline)"
+	@echo "  REVOCATION=2 → CRL+OCSP future mode (DEV only; blocked in PROD/BENCH until OCSP implemented)"
+	@echo "  REVOCATION=0 → DEV only / __SKIP_SECURITY__ override (no revocation checks)"
 	@echo "  $(Y)Tip:$(RS) To disable mTLS: use DEV mode → $(C)make PROD=0 mTLS=0$(RS)"
-	@echo "$(R)  __SKIP_SECURITY__=1 → CI/test only. Disables enforcement checks (TLS still ON). Not for PROD/BENCH artifacts.$(RS)"
+	@echo "$(Y)  __SKIP_SECURITY__=1 → CI/test only. Disables enforcement checks (TLS still ON). Not for PROD/BENCH artifacts.$(RS)"
 	@echo ""
 	@echo "$(G)Sanitizers (DEV only):$(RS)"
 	@echo "  SANITIZER_FAIL_FAST=1 → Abort immediately"
