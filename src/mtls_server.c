@@ -37,6 +37,44 @@
 #include <sys/resource.h> /* setrlimit(), struct rlimit          */
 #include <sys/stat.h>     /* For jail directory permissions etc. */
 
+/* ============================================================================
+ * Compile-time TLS port and certificate paths (runtime-relative)
+ * ============================================================================
+ *
+ * Expected runtime execution:
+ *
+ *     cd <repo-root>
+ *     ./build/mtls_server
+ *
+ * Certificate files must exist at:
+ *
+ *     <repo-root>/certs/server-cert.pem
+ *     <repo-root>/certs/server-key.pem
+ *     <repo-root>/certs/ca-server-cert.pem
+ *
+ * For OpenSSL loading (from ./build/):
+ *     "../certs/<filename>"
+ *
+ * For log messages (filenames only)
+ * ============================================================================
+ */
+
+#define CERTIFICATE_FOLDER   "certs"
+
+#define SERVER_CERT_FILENAME "server-cert.pem"
+#define SERVER_KEY_FILENAME  "server-key.pem"
+#define CA_CERT_FILENAME     "ca-server-cert.pem"
+
+/* Paths for OpenSSL API calls */
+#define SERVER_CERT_PATH_FULL  ("../" CERTIFICATE_FOLDER "/" SERVER_CERT_FILENAME)
+#define SERVER_KEY_PATH_FULL   ("../" CERTIFICATE_FOLDER "/" SERVER_KEY_FILENAME)
+#define CA_CERT_PATH_FULL      ("../" CERTIFICATE_FOLDER "/" CA_CERT_FILENAME)
+
+/* Filenames only — used in LOG_ERROR(), LOG_INFO(), etc. */
+#define SERVER_CERT_NAME SERVER_CERT_FILENAME
+#define SERVER_KEY_NAME  SERVER_KEY_FILENAME
+#define CA_CERT_NAME     CA_CERT_FILENAME
+
 /*
 ===============================================================================
 BUILD CONFIGURATION, MODE SELECTION, AND LOGGING
@@ -87,15 +125,20 @@ Valid final mode states are:
 Any build that defines both __DEV__ and __BENCH__ at the same time is invalid.
 
 -------------------------------------------------------------------------------
-TLS Feature Selection (__ENABLE_MUTUAL_TLS__)
+TLS Feature Selection (__REQUIRE_MUTUAL_TLS__)
 -------------------------------------------------------------------------------
 
-    - If __ENABLE_MUTUAL_TLS__ is undefined:
+    - If __REQUIRE_MUTUAL_TLS__ is undefined:
           Mutual TLS is disabled (server authenticates itself only).
 
-    - If __ENABLE_MUTUAL_TLS__ is defined:
+    - If __REQUIRE_MUTUAL_TLS__ is defined:
           Client certificate authentication is required; the TLS context
           is configured accordingly (CA list, verify depth, etc.).
+
+		Security Policy Update:
+			In PROD and BENCH modes, TLS=0 is NOT permitted.
+			Makefile enforces build failure if TLS=0 with PROD OR BENCH.
+			TLS=0 is valid ONLY in DEV mode.
 
 -------------------------------------------------------------------------------
 Logging flags (from Makefile only)
@@ -108,6 +151,9 @@ The following preprocessor symbols may be passed from the Makefile:
     -D__LOG_ENABLE_DEBUG__
 
 Rules enforced here:
+
+		- LOG_ERROR is always compiled and active even if no __LOG_ENABLE_* macros.
+			INFO is the ONLY allowed non-error log in hardened modes (PROD/BENCH).
 
     - __LOG_ENABLE_DEBUG__ is only allowed when __DEV__ is defined.
       (DEBUG logging is forbidden in PROD and BENCH builds.)
@@ -170,7 +216,7 @@ This C block provides a second line of defense if the Makefile is bypassed.
  * If __LOG_ENABLE_DEBUG__ is set without __DEV__, this is a hard error.
  */
 
-#if defined(__LOG_ENABLE_DEBUG__) && !defined(__DEV__)
+#if defined(__LOG_ENABLE_DEBUG__) && !defined(__DEV__) && !defined(__SKIP_SECURITY__)
 #error "DEBUG logging is only allowed in __DEV__ builds. Remove __LOG_ENABLE_DEBUG__ or build with DEV=1."
 #endif
 
@@ -245,7 +291,7 @@ Default build behavior (when running plain "make"):
 
     - PROD mode (hardened security, minimal logs).
     - Mutual TLS enabled (TLS=1, client certificate required).
-    - Strict HTTP Host enforcement using RV_ALLOWED_HOST.
+    - Strict HTTP Host enforcement using __ALLOWED_HOST__.
     - TLS listener on TCP port 443 (standard HTTPS/TLS port).
 
 User-configurable build-time security modes and options:
@@ -294,14 +340,14 @@ TLS selection (via Makefile)
         - Server certificate is presented to the client.
         - Client certificate must be presented and validated.
         - Hostname verification uses TLS SNI / certificate SAN.
-        - Compile-time: __ENABLE_MUTUAL_TLS__ defined.
+        - Compile-time: __REQUIRE_MUTUAL_TLS__ defined.
 
     TLS=0:
         - Server-auth TLS only (no client certificate requested).
         - Server certificate is validated by the client.
         - TLS encryption is still enforced; only mutual authentication is
           disabled.
-        - Compile-time: __ENABLE_MUTUAL_TLS__ not defined.
+        - Compile-time: __REQUIRE_MUTUAL_TLS__ not defined.
 
 All modes listen on TCP port 443 by default. Binding to port 443 normally
 requires starting as root and then dropping privileges.
@@ -440,9 +486,9 @@ CONFIGURATION MAPPING (MAKE vs DIRECT gcc -D... USAGE)
 This server is intended to be built via the Makefile. The Makefile ensures:
 
     - Exactly one mode is selected: PROD / DEV / BENCH.
-    - TLS mode (TLS=0 / TLS=1) is correctly mapped to __ENABLE_MUTUAL_TLS__.
+    - TLS mode (TLS=0 / TLS=1) is correctly mapped to __REQUIRE_MUTUAL_TLS__.
     - Logging macros (__LOG_ENABLE_WARN__/INFO/DEBUG) are consistent with mode.
-    - RV_ALLOWED_HOST is set to the correct value per mode.
+    - __ALLOWED_HOST__ is set to the correct value per mode.
     - Hardened compiler/linker flags are applied for PROD and BENCH builds.
 
 However, for debugging, experimentation, or when integrating with other build
@@ -482,8 +528,8 @@ Make command (recommended):
 Equivalent gcc command (approximate):
 
     gcc TCP_Server.c -o TCP_Server \
-        -D__ENABLE_MUTUAL_TLS__ \
-        -DRV_ALLOWED_HOST=\"secure.lab.linux\" \
+        -D__REQUIRE_MUTUAL_TLS__ \
+        -D__ALLOWED_HOST__=\"secure.lab.linux\" \
         -D__LOG_ENABLE_WARN__ \
         -D__LOG_ENABLE_INFO__ \
         -std=c2x \
@@ -496,9 +542,9 @@ Equivalent gcc command (approximate):
 Why equivalent:
 
     - PROD mode: neither __DEV__ nor __BENCH__ is defined.
-    - TLS=1 maps to __ENABLE_MUTUAL_TLS__.
+    - TLS=1 maps to __REQUIRE_MUTUAL_TLS__.
     - WARN=1 and INFO=1 map to __LOG_ENABLE_WARN__ and __LOG_ENABLE_INFO__.
-    - RV_ALLOWED_HOST is set to "secure.lab.linux" as in the Makefile defaults.
+    - __ALLOWED_HOST__ is set to "secure.lab.linux" as in the Makefile defaults.
 
 Security note:
 
@@ -520,7 +566,7 @@ Make command:
 Equivalent gcc command:
 
     gcc TCP_Server.c -o TCP_Server \
-        -DRV_ALLOWED_HOST=\"secure.lab.linux\" \
+        -D__ALLOWED_HOST__=\"secure.lab.linux\" \
         -D__LOG_ENABLE_WARN__ \
         -std=c2x \
         -Wall -Wextra -Werror -Wpedantic \
@@ -531,10 +577,10 @@ Equivalent gcc command:
 
 Why equivalent:
 
-    - __ENABLE_MUTUAL_TLS__ is not defined (TLS=0).
+    - __REQUIRE_MUTUAL_TLS__ is not defined (TLS=0).
     - WARN logs are enabled via __LOG_ENABLE_WARN__.
     - Host enforcement for PROD is still strict: HTTP Host must match
-      RV_ALLOWED_HOST.
+      __ALLOWED_HOST__.
 
 Security note:
 
@@ -557,7 +603,7 @@ Equivalent gcc command:
 
     gcc TCP_Server.c -o TCP_Server \
         -D__DEV__ \
-        -D__ENABLE_MUTUAL_TLS__ \
+        -D__REQUIRE_MUTUAL_TLS__ \
         -D__LOG_ENABLE_WARN__ \
         -D__LOG_ENABLE_INFO__ \
         -D__LOG_ENABLE_DEBUG__ \
@@ -572,7 +618,7 @@ Equivalent gcc command:
 Why equivalent:
 
     - PROD=0 maps to __DEV__ (DEV mode).
-    - TLS=1 maps to __ENABLE_MUTUAL_TLS__.
+    - TLS=1 maps to __REQUIRE_MUTUAL_TLS__.
     - LOG_ALL=1 in the Makefile expands to all three __LOG_ENABLE_* macros.
     - DEV builds enable sanitizers and debug information.
 
@@ -609,7 +655,7 @@ Equivalent gcc command:
 Why equivalent:
 
     - DEV mode is selected with __DEV__.
-    - No __ENABLE_MUTUAL_TLS__ means TLS=0 (still encrypted, no client certs).
+    - No __REQUIRE_MUTUAL_TLS__ means TLS=0 (still encrypted, no client certs).
     - DEBUG=1 maps to __LOG_ENABLE_DEBUG__.
     - Sanitizers and debug info reflect DEV mode.
 
@@ -634,8 +680,8 @@ Equivalent gcc command:
 
     gcc TCP_Server.c -o TCP_Server \
         -D__BENCH__ \
-        -D__ENABLE_MUTUAL_TLS__ \
-        -DRV_ALLOWED_HOST=\"127.0.0.1\" \
+        -D__REQUIRE_MUTUAL_TLS__ \
+        -D__ALLOWED_HOST__=\"127.0.0.1\" \
         -D__LOG_ENABLE_INFO__ \
         -std=c2x \
         -O2 \
@@ -647,9 +693,9 @@ Equivalent gcc command:
 Why equivalent:
 
     - BENCH=1 maps to __BENCH__, with neither __DEV__ nor __PROD__ defined.
-    - TLS=1 maps to __ENABLE_MUTUAL_TLS__.
+    - TLS=1 maps to __REQUIRE_MUTUAL_TLS__.
     - INFO=1 maps to __LOG_ENABLE_INFO__.
-    - RV_ALLOWED_HOST is typically 127.0.0.1 for BENCH builds.
+    - __ALLOWED_HOST__ is typically 127.0.0.1 for BENCH builds.
 
 Security note:
 
@@ -671,7 +717,7 @@ Equivalent gcc command:
 
     gcc TCP_Server.c -o TCP_Server \
         -D__BENCH__ \
-        -DRV_ALLOWED_HOST=\"127.0.0.1\" \
+        -D__ALLOWED_HOST__=\"127.0.0.1\" \
         -D__LOG_ENABLE_WARN__ \
         -std=c2x \
         -O2 \
@@ -683,7 +729,7 @@ Equivalent gcc command:
 Why equivalent:
 
     - __BENCH__ selects BENCH mode.
-    - No __ENABLE_MUTUAL_TLS__ corresponds to TLS=0 (still TLS, no client
+    - No __REQUIRE_MUTUAL_TLS__ corresponds to TLS=0 (still TLS, no client
       certificates).
     - WARN=1 maps to __LOG_ENABLE_WARN__.
 
@@ -703,8 +749,8 @@ Minimal PROD, mutual TLS, no extra logs:
 Approximate gcc:
 
     gcc TCP_Server.c -o TCP_Server \
-        -D__ENABLE_MUTUAL_TLS__ \
-        -DRV_ALLOWED_HOST=\"secure.lab.linux\" \
+        -D__REQUIRE_MUTUAL_TLS__ \
+        -D__ALLOWED_HOST__=\"secure.lab.linux\" \
         -std=c2x -O2 \
         -Wall -Wextra -Wpedantic \
         -Wformat=2 -Wshadow -Wpointer-arith \
@@ -735,8 +781,8 @@ Approximate gcc:
 
     gcc TCP_Server.c -o TCP_Server \
         -D__BENCH__ \
-        -D__ENABLE_MUTUAL_TLS__ \
-        -DRV_ALLOWED_HOST=\"127.0.0.1\" \
+        -D__REQUIRE_MUTUAL_TLS__ \
+        -D__ALLOWED_HOST__=\"127.0.0.1\" \
         -std=c2x \
         -O2 \
         -Wall -Wextra -Wpedantic \
@@ -752,7 +798,7 @@ Makefile configurations.
 HOST ENFORCEMENT AND ALLOWED HOSTS
 ===============================================================================
 
-The Makefile sets RV_ALLOWED_HOST at compile time, using:
+The Makefile sets __ALLOWED_HOST__ at compile time, using:
 
     PROD_HOST  ?= secure.lab.linux
     DEV_HOST   ?= localhost
@@ -760,14 +806,14 @@ The Makefile sets RV_ALLOWED_HOST at compile time, using:
 
 and then:
 
-    PROD  build  -> RV_ALLOWED_HOST = $(PROD_HOST)
-    DEV   build  -> RV_ALLOWED_HOST = $(DEV_HOST)
-    BENCH build  -> RV_ALLOWED_HOST = $(BENCH_HOST)
+    PROD  build  -> __ALLOWED_HOST__ = $(PROD_HOST)
+    DEV   build  -> __ALLOWED_HOST__ = $(DEV_HOST)
+    BENCH build  -> __ALLOWED_HOST__ = $(BENCH_HOST)
 
 Runtime behavior:
 
     PROD  builds:
-        - HTTP "Host" header must match RV_ALLOWED_HOST exactly.
+        - HTTP "Host" header must match __ALLOWED_HOST__ exactly.
         - On mismatch, the server returns HTTP 400 "Host not allowed!".
 
     DEV   builds:
@@ -844,7 +890,7 @@ PROD mode, TLS=1 (mutual TLS, strict host enforcement):
             * client-cert.pem chains to ca-cert.pem, and
             * the server certificate SAN/CN matches "secure.lab.linux".
         - HTTP/1.1 200 OK is returned.
-        - If Host does not match RV_ALLOWED_HOST, the server returns HTTP 400.
+        - If Host does not match __ALLOWED_HOST__, the server returns HTTP 400.
 
 BENCH mode, TLS=0 (server-auth TLS, minimal logging):
 
@@ -883,7 +929,7 @@ Negative tests (expected failures):
         - TLS hostname verification must fail.
 
     3) Wrong Host header in PROD:
-        - Use Host different from RV_ALLOWED_HOST.
+        - Use Host different from __ALLOWED_HOST__.
         - Response must be HTTP 400 "Host not allowed!".
 
 ===============================================================================
@@ -1002,6 +1048,17 @@ Examples:
         sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 100
         sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-15 100
 
+
+Optional: JSON audit utility (recommended for CI/test environments)
+
+    sudo apt install jq
+
+    jq:
+        - Used by test_builds.sh to merge per-build JSON results into
+          summary.json for audit and compliance visibility.
+        - If jq is not installed, test_builds.sh will still run using a
+          minimal JSON summary (no runtime dependency in the server).
+
 Optional: build a recent OpenSSL from source if system OpenSSL is too old:
 
     mkdir ~/openssl_3_5
@@ -1044,6 +1101,7 @@ Summary of installed packages and commands:
     build-essential              -> Core build toolkit (make, ld, headers)
     apt-file, apt-file update    -> Helps locate missing headers/libraries
     openssl, libssl-dev          -> Runtime and development support for TLS
+    jq (optional)                -> JSON compliance audit reports for CI
     update-alternatives ...      -> Switches system to chosen GCC <V> by default
     make / sudo make install     -> Builds and installs OpenSSL from source
     openssl version -a           -> Verifies installed OpenSSL version
@@ -1124,6 +1182,7 @@ static void SignalHandler_SetExitFlag(int signum)
 	g_exit_requested = 1;
 	g_last_signal = signum;
 }
+
 /* ============================================================================
  * SAN-mode OpenSSL error handler
  * ============================================================================
@@ -1212,6 +1271,8 @@ static void rvShutDownSSL_AndCloseFD(void)
 		iAcceptedClientFileDescriptor = -1;
 	}
 }
+
+#if !defined(__DEV__)
 
 /* ============================================================================
  * OS-level sandbox for PROD / BENCH
@@ -1308,6 +1369,8 @@ static void rvApplyResourceLimits(void)
 		LOG_ERROR_ERRNO("setrlimit(RLIMIT_NPROC) failed");
 	}
 }
+
+#endif // of !defined(__DEV__)
 
 static int ssl_write_all(SSL* ssl_handle, const char* buffer, int length)
 {
@@ -1457,9 +1520,9 @@ static bool InitializeServer(void)
 		SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION | SSL_OP_NO_RENEGOTIATION);
 
 		/* Load certificate and ECDSA private key (PEM files) */
-		if (0 >= SSL_CTX_use_certificate_file(ctx, "cert.pem", SSL_FILETYPE_PEM))
+		if (0 >= SSL_CTX_use_certificate_file(ctx, SERVER_CERT_PATH_FULL, SSL_FILETYPE_PEM))
 		{
-			LOG_ERROR("Failed to load server certificate (cert.pem)");
+			LOG_ERROR("Failed to load server certificate (%s)", SERVER_CERT_NAME);
 #if defined(__DEV__) && defined(__LOG_ENABLE_DEBUG__)
 			/* Only in DEV + DEBUG: show OpenSSL error details */
 			ERR_print_errors_fp(stderr);
@@ -1474,9 +1537,9 @@ static bool InitializeServer(void)
 #endif
 		}
 
-		if (0 >= SSL_CTX_use_PrivateKey_file(ctx, "key.pem", SSL_FILETYPE_PEM))
+		if (0 >= SSL_CTX_use_PrivateKey_file(ctx, SERVER_KEY_PATH_FULL, SSL_FILETYPE_PEM))
 		{
-			LOG_ERROR("Failed to load private key (key.pem)");
+			LOG_ERROR("Failed to load private key (%s)", SERVER_KEY_NAME);
 #if defined(__DEV__) && defined(__LOG_ENABLE_DEBUG__)
 			/* Only in DEV + DEBUG: show OpenSSL error details */
 			ERR_print_errors_fp(stderr);
@@ -1498,12 +1561,11 @@ static bool InitializeServer(void)
 			break;
 		}
 
-#if defined( __ENABLE_MUTUAL_TLS__ )
+#if defined( __REQUIRE_MUTUAL_TLS__ )
 		/* Load CA first */
-		static const char CACertFileName[] = "ca-cert.pem";
-		if (1 != SSL_CTX_load_verify_locations(ctx, CACertFileName, ((const char*)NULL)))
+		if (1 != SSL_CTX_load_verify_locations(ctx, CA_CERT_PATH_FULL, ((const char*)NULL)))
 		{
-			LOG_ERROR("Failed to load CA certificate for mutual TLS");
+			LOG_ERROR("Failed to load CA certificate (%s)", CA_CERT_NAME);
 
 #if defined(__DEV__) && defined(__LOG_ENABLE_DEBUG__)
 			ERR_print_errors_fp(stderr);
@@ -1517,30 +1579,41 @@ static bool InitializeServer(void)
 			rvSanAbortOnOpenSSLError("SSL_CTX_load_verify_locations", SSL_ERROR_SSL);
 #endif
 		}
-		LOG_INFO("Mutual TLS enabled: verifying client certificates using ca-cert.pem");
+		LOG_INFO("Mutual TLS enabled: verifying client certificates using ca-server-cert.pem");
 		/*
 		 * Mutual TLS (Client Certificate Authentication)
 		 * Require clients to present a certificate and verify it using our CA.
 		 */
 		SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, ((int (*)(int, X509_STORE_CTX*))NULL));
-#else // of defined( __ENABLE_MUTUAL_TLS__ )
+#else // of defined( __REQUIRE_MUTUAL_TLS__ )
+    /*
+     * DEV or BENCH with TLS=0:
+     * -------------------------------------
+     * - TLS encryption still required
+     * - No client certificate authentication
+     * - Do NOT enable SSL_VERIFY_FAIL_IF_NO_PEER_CERT
+     *
+     * Defense rule:
+     *   Verification must be explicitly disabled when TLS=0,
+     *   to avoid accidental partial client-auth dependencies.
+     */
 		SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, ((int (*)(int, X509_STORE_CTX*))NULL));
-#endif // of defined( __ENABLE_MUTUAL_TLS__ )
+#endif // of defined( __REQUIRE_MUTUAL_TLS__ )
 
-#if defined( __ENABLE_MUTUAL_TLS__ )
+#if defined( __REQUIRE_MUTUAL_TLS__ )
 		/* Allow intermediate chains up to depth 3 */
 		SSL_CTX_set_verify_depth(ctx, 3);
 
-		STACK_OF(X509_NAME)* ca_list = SSL_load_client_CA_file(CACertFileName);
+		STACK_OF(X509_NAME)* ca_list = SSL_load_client_CA_file(CA_CERT_PATH_FULL);
 		if (((STACK_OF(X509_NAME)*)NULL) != ca_list)
 		{
 			SSL_CTX_set_client_CA_list(ctx, ca_list);
 		}
 		else
 		{
-			LOG_WARN("Warning: Failed to load client CA list from %s", CACertFileName);
+			LOG_WARN("Warning: Failed to load client CA list from %s", CA_CERT_PATH_FULL);
 		}
-#endif // of defined( __ENABLE_MUTUAL_TLS__ )
+#endif // of defined( __REQUIRE_MUTUAL_TLS__ )
 
 		/* TLS Cipher Configuration
 		 *
@@ -1589,7 +1662,7 @@ static bool InitializeServer(void)
 		hints.ai_socktype = SOCK_STREAM;
 		hints.ai_protocol = 0;
 
-		const int iGetAddInfoErrCode = getaddrinfo((const char*)NULL, (const char*)"8080", &hints, &server);
+		const int iGetAddInfoErrCode = getaddrinfo((const char*)NULL, (const char*)__TLS_PORT_STR__, &hints, &server);
 		if (0 != iGetAddInfoErrCode)
 		{
 			LOG_ERROR("getaddrinfo: %s", gai_strerror(iGetAddInfoErrCode));
@@ -1731,11 +1804,11 @@ static bool InitializeServer(void)
 			LOG_ERROR_ERRNO("listen");
 			break;
 		}
-#if defined( __ENABLE_MUTUAL_TLS__ )
-		LOG_INFO("\nHTTPS (Mutual TLS) server listening on port 8080...");
-#else // of defined( __ENABLE_MUTUAL_TLS__ )
-		LOG_INFO("\nHTTPS (TLS) server listening on port 8080...");
-#endif // of defined( __ENABLE_MUTUAL_TLS__ )
+#if defined( __REQUIRE_MUTUAL_TLS__ )
+		LOG_INFO("\nHTTPS (Mutual TLS) server listening on port %d...", (int)__TLS_PORT__);
+#else // of defined( __REQUIRE_MUTUAL_TLS__ )
+		LOG_INFO("\nHTTPS (TLS) server listening on port %d...", (int)__TLS_PORT__);
+#endif // of defined( __REQUIRE_MUTUAL_TLS__ )
 
 		ret = true;
 	} while (false);
@@ -1989,7 +2062,7 @@ static void RunServerLoop(void)
 				continue;
 			}
 
-#if defined( __ENABLE_MUTUAL_TLS__ )
+#if defined( __REQUIRE_MUTUAL_TLS__ )
 			/* Enforce hostname check against certificate (SAN/CN) */
 			if (1 != SSL_set1_host(ssl, host))
 			{
@@ -2000,7 +2073,7 @@ static void RunServerLoop(void)
 				iAcceptedClientFileDescriptor = -1;
 				continue;
 			}
-#endif // of defined( __ENABLE_MUTUAL_TLS__ )
+#endif // of defined( __REQUIRE_MUTUAL_TLS__ )
 		}
 
 		const int ret_ssl = SSL_accept(ssl);
@@ -2015,7 +2088,9 @@ static void RunServerLoop(void)
 			else
 			{
 				LOG_ERROR("TLS connection closed or client did not send HTTP request (SSL error=%d) on fd %d", err, iAcceptedClientFileDescriptor);
+#if defined(__DEV__)
 				ERR_print_errors_fp(stderr);
+#endif
 				rvSanAbortOnOpenSSLError("SSL_accept", err);
 			}
 
@@ -2024,7 +2099,7 @@ static void RunServerLoop(void)
 		}
 
 		/* ---- Start: Mutual TLS block ---- */
-#if defined( __ENABLE_MUTUAL_TLS__ )
+#if defined( __REQUIRE_MUTUAL_TLS__ )
 		{
 			X509* client_cert = SSL_get_peer_certificate(ssl);
 			if (NULL != client_cert)
@@ -2049,7 +2124,7 @@ static void RunServerLoop(void)
 				continue;
 			}
 		}
-#endif // of defined( __ENABLE_MUTUAL_TLS__ )
+#endif // of defined( __REQUIRE_MUTUAL_TLS__ )
 		/* ---- End: mutual TLS block ---- */
 
 		/**** Read request (accumulate full header) ****/
@@ -2235,33 +2310,30 @@ static void RunServerLoop(void)
 			LOG_INFO("Validated Host: %s", req_host);
 
 			/*
-			 * Host enforcement:
+			 * Host Enforcement (Defense-Grade Policy)
 			 *
-			 *   - The allowed Host header value is provided at compile time via
-			 *     RV_ALLOWED_HOST, which is set from the Makefile using:
+			 * Enforcement rules:
 			 *
-			 *         -DRV_ALLOWED_HOST="secure.lab.linux"
+			 *   DEV:
+			 *     - Log mismatch but allow request (development convenience)
 			 *
-			 *     or per-mode overrides (PROD_HOST / DEV_HOST / BENCH_HOST).
-			 *
-			 *   - PROD  : strict enforcement → mismatch is rejected.
-			 *   - DEV   : mismatch is logged but the request is allowed.
-			 *   - BENCH : no enforcement; Host is only logged for visibility.
+			 *   BENCH / PROD:
+			 *     - STRICT reject on mismatch — ensures performance evaluation
+			 *       is done under correct operational hostname
 			 */
-#if defined(__BENCH__)
-			LOG_INFO("BENCH mode: Host header = %s (RV_ALLOWED_HOST=%s)", req_host, RV_ALLOWED_HOST);
-#else
-			if (0 != strcmp(req_host, RV_ALLOWED_HOST))
-			{
+
 #if defined(__DEV__)
-				LOG_WARN("DEV mode: Host header '%s' != expected '%s' (allowing in DEV build)", req_host, RV_ALLOWED_HOST);
-				/* Continue processing request in DEV mode. */
-#else
-				/* PROD: strict Host enforcement. */
+			if (0 != strcmp(req_host, __ALLOWED_HOST__))
+			{
+				LOG_WARN("DEV: Host '%s' != allowed '%s' (allowed only in DEV)", req_host, __ALLOWED_HOST__);
+			}
+#else /* BENCH/PROD — strict */
+			if (0 != strcmp(req_host, __ALLOWED_HOST__))
+			{
+				LOG_ERROR("Host mismatch '%s' != '%s' (rejected in BENCH/PROD)", req_host, __ALLOWED_HOST__);
 				(void)send_http_response(ssl, 400, "Bad Request", "Host not allowed!\r\n");
 				rvShutDownSSL_AndCloseFD();
 				continue;
-#endif
 			}
 #endif
 

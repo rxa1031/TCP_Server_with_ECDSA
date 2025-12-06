@@ -1,0 +1,31 @@
+name: Build Validation
+
+on:
+  pull_request:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install OpenSSL & GCC
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gcc g++ make openssl libssl-dev
+
+      - name: Run Validation Suite
+        run: |
+          chmod +x ./test_builds.sh
+          ./test_builds.sh
+
+      - name: Display Summary
+        run: |
+          echo "Validation completed. Review JSON under build_logs/json/"
+          jq '.' build_logs/json/summary.json || true
+
+    # CI should fail on any unexpected build failures
+    continue-on-error: false

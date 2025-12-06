@@ -9,10 +9,14 @@
 #  - Mode + Logging flags reported per build
 #  - UTF-8 icon auto-detect (ASCII fallback)
 #  - JSON log generation for CI/audit
+#  - Timing per build (duration_seconds)
+#  - Summary JSON aggregation (summary.json)
+#  - Override audit for SKIP_SECURITY=1
 #  - Compliance summary at end
 # -----------------------------------------------------------------------------
 
 set -o pipefail
+set -u  # fail on use of unset variables
 
 BUILD_LOG_DIR="build_logs"
 JSON_DIR="$BUILD_LOG_DIR/json"
@@ -41,8 +45,8 @@ if [ -t 1 ]; then
   RED="\033[31m"
   YELLOW="\033[33m"
   BLUE="\033[34m"
-  # High-contrast FAIL: red foreground on white background
-  FAIL_COLOR="\033[31m\033[47m"
+  # High-contrast FAIL: bold red foreground on white background (accessibility)
+  FAIL_COLOR="\033[1;31m\033[47m"
   RESET="\033[0m"
 else
   GREEN=""
@@ -58,8 +62,18 @@ echo "  Build Validation — $timestamp"
 echo "============================================"
 echo
 
+json_escape() {
+    local s=$1
+    s=${s//\\/\\\\}   # escape backslash
+    s=${s//\"/\\\"}   # escape double quote
+    s=${s//$'\n'/\\n} # escape newline
+    s=${s//$'\r'/\\r} # escape carriage return
+    s=${s//$'\t'/\\t} # escape tab
+    printf '%s' "$s"
+}
+
 # -----------------------------------------------------------------------------
-# JSON Writer — used for all PASS + CORRECT-FAIL cases
+# JSON Writer — used for all test results (PASS / FAIL / CORRECT-FAIL)
 # -----------------------------------------------------------------------------
 write_json_report() {
     local name="$1"
@@ -72,6 +86,7 @@ write_json_report() {
     local log_warn="$8"
     local log_info="$9"
     local log_debug="${10}"
+    local duration="${11}"
 
     # SKIP_SECURITY override detection
     local skip_security="0"
@@ -82,12 +97,14 @@ write_json_report() {
 
     # Extract basic configuration from GCC command
     local host tls_port rev_level rev_desc
-
     host=$(echo "$gcc_cmd" | sed -n 's/.*-D__ALLOWED_HOST__=\\"\(.*\)\\".*/\1/p')
     tls_port=$(echo "$gcc_cmd" | sed -n 's/.*-D__TLS_PORT__=\([0-9]*\).*/\1/p')
     rev_level=$(echo "$gcc_cmd" | sed -n 's/.*-D__REVOCATION_LEVEL__=\([0-9]*\).*/\1/p')
 
-    # Revocation description (aligned to DefStan views)
+    [ -z "$host" ] && host="__UNSET__"
+    [ -z "$tls_port" ] && tls_port="__UNSET__"
+    [ -z "$rev_level" ] && rev_level="__UNSET__"
+
     case "$rev_level" in
         0) rev_desc="0 — Revocation disabled (DEV/override only)" ;;
         1) rev_desc="1 — CRL required (Hardened configuration requirement)" ;;
@@ -98,24 +115,25 @@ write_json_report() {
     local json_file="$JSON_DIR/${name}.json"
     cat > "$json_file" <<EOF
 {
-  "name": "$name",
-  "command": "$cmd",
-  "status": "$status",
-  "mode": "$mode",
-  "skip_security": "$skip_security",
-  "host": "$host",
-  "tls_port": "$tls_port",
-  "revocation_level": "$rev_level",
-  "revocation_description": "$rev_desc",
+  "name": "$(json_escape "$name")",
+  "command": "$(json_escape "$cmd")",
+  "status": "$(json_escape "$status")",
+  "mode": "$(json_escape "$mode")",
+  "skip_security": "$(json_escape "$skip_security")",
+  "host": "$(json_escape "$host")",
+  "tls_port": "$(json_escape "$tls_port")",
+  "revocation_level": "$(json_escape "$rev_level")",
+  "revocation_description": "$(json_escape "$rev_desc")",
   "logging": {
-    "error": "$log_error",
-    "warn": "$log_warn",
-    "info": "$log_info",
-    "debug": "$log_debug"
+    "error": "$(json_escape "$log_error")",
+    "warn": "$(json_escape "$log_warn")",
+    "info": "$(json_escape "$log_info")",
+    "debug": "$(json_escape "$log_debug")"
   },
-  "gcc_command": "$gcc_cmd",
-  "log_file": "$log",
-  "timestamp": "$timestamp"
+  "gcc_command": "$(json_escape "$gcc_cmd")",
+  "log_file": "$(json_escape "$log")",
+  "duration_seconds": "$(json_escape "$duration")",
+  "timestamp": "$(json_escape "$timestamp")"
 }
 EOF
 }
@@ -125,7 +143,6 @@ EOF
 # -----------------------------------------------------------------------------
 detect_policy_category() {
     local src="$1"
-
     if echo "$src" | grep -qE "mTLS=0|-U__REQUIRE_MUTUAL_TLS__"; then
         echo "Mutual TLS Client Certificate Enforcement"
     elif echo "$src" | grep -qE "REVOCATION=0|-D__REVOCATION_LEVEL__=0"; then
@@ -138,7 +155,7 @@ detect_policy_category() {
 }
 
 # -----------------------------------------------------------------------------
-# Build Counters
+# Counters
 # -----------------------------------------------------------------------------
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -154,33 +171,59 @@ test_case() {
     local result="FAIL"
 
     echo ">> Testing: $cmd"
-
     make clean >/dev/null 2>&1
 
-    if bash -c "$cmd" &> "$log"; then
+    # Timing start
+    local start_time end_time duration
+    start_time=$(date +%s)
+
+    # Execute build
+    if bash -c "$cmd -B" &> "$log"; then
         result="PASS"
         PASS_COUNT=$((PASS_COUNT+1))
         echo -e "${GREEN}${PASS_ICON} [PASS] – Build succeeded${RESET}"
     else
-        # Blocked or unexpected fail
-        if grep -qiE "(Invalid:|Missing required certificate)" "$log"; then
+        result="FAIL"
+    fi
+
+    # Timing end
+    end_time=$(date +%s)
+    duration=$(( end_time - start_time ))
+
+    local gcc_cmd=""
+    gcc_cmd=$(
+        grep -E '\bgcc(-[0-9]+)?\b' "$log" \
+        | grep -v " -c " \
+        | tail -1 || true
+    )
+
+    # CORRECT-FAIL classification AFTER gcc_cmd exists
+    if [ "$result" = "FAIL" ]; then
+        if grep -qiE "(Invalid( certificate)?|verify.*failed|certificate.*(revoked|expired|unknown)|Missing required certificate)" "$log"; then
             result="CORRECT-FAIL"
             CORRECT_FAIL_COUNT=$((CORRECT_FAIL_COUNT+1))
+
             echo -e "${YELLOW}[CORRECT-FAIL]${RESET} ${POLICY_ICON} Enforcement Triggered"
-            # Provide a reason for both Invalid: and Missing required certificate
-            if grep -qi "Invalid:" "$log"; then
-                echo "Reason: $(grep 'Invalid:' "$log" | sed 's/.*Invalid: //')"
-            elif grep -qi "Missing required certificate" "$log"; then
-                echo "Reason: $(grep -i 'Missing required certificate' "$log" | head -1)"
+
+            local reason
+            reason=$(
+                grep -iE "Invalid( certificate)?|verify.*failed|certificate.*(revoked|expired|unknown)|Missing required certificate" "$log" \
+                | head -1 \
+                | sed 's/.*Invalid: //; s/Stop\.$//'
+            )
+
+            if [ -n "$reason" ]; then
+                echo -e "${FAIL_COLOR}Reason: ${reason}${RESET}"
             else
-                echo "Reason: Policy enforcement triggered (see log for details)"
+                echo -e "${FAIL_COLOR}Reason: Policy enforcement triggered (see log for details)${RESET}"
             fi
-            echo "Policy Category: $(detect_policy_category "$cmd")"
+
+            echo "Policy Category: $(detect_policy_category "$cmd $gcc_cmd")"
             echo "---- Policy Enforcement Verified ----"
+
         else
-            result="FAIL"
             FAIL_COUNT=$((FAIL_COUNT+1))
-            # High-contrast FAIL here
+            # High-contrast FAIL here (bold red on white)
             echo -e "${FAIL_COLOR}${FAIL_ICON} [FAIL] – Unexpected build failure${RESET}"
             echo "--- Compiler/Build Output ---"
             cat "$log"
@@ -188,21 +231,15 @@ test_case() {
         fi
     fi
 
-    local gcc_cmd
-    gcc_cmd=$(grep -oE '(^| )gcc(-[0-9]+)? [^"]*' "$log" | tail -1 || true)
-
-    # Optional visibility if we never reached the compile phase
-    if [ -z "$gcc_cmd" ]; then
-        echo -e "${YELLOW}Warning:${RESET} No GCC command found in log (build may have failed before compilation)."
+    # Optional visibility if we never reached the compile phase in an unexpected failure
+    if [ "$result" = "FAIL" ] && [ -z "$gcc_cmd" ]; then
+        echo -e "${YELLOW}Warning:${RESET} No GCC invocation detected (build may have failed before compilation)."
     fi
 
     # default is PROD
     local mode="PROD"
-    if [[ "$gcc_cmd" =~ -D__DEV__ ]]; then
-        mode="DEV"
-    elif [[ "$gcc_cmd" =~ -D__BENCH__ ]]; then
-        mode="BENCH"
-    fi
+    [[ "$gcc_cmd" =~ -D__DEV__ ]] && mode="DEV"
+    [[ "$gcc_cmd" =~ -D__BENCH__ ]] && mode="BENCH"
 
     # Logging macro detection
     local log_error="0" log_warn="0" log_info="0" log_debug="0"
@@ -219,13 +256,14 @@ test_case() {
 
     write_json_report \
         "$name" "$cmd" "$result" "$log" "$gcc_cmd" "$mode" \
-        "$log_error" "$log_warn" "$log_info" "$log_debug"
+        "$log_error" "$log_warn" "$log_info" "$log_debug" \
+        "$duration"
 
     echo
 }
 
 # -----------------------------------------------------------------------------
-# Execute Test Matrix
+# Test Groups
 # -----------------------------------------------------------------------------
 echo "----- Testing Allowed Builds -----"
 test_case "prod_default"         "make"
@@ -239,29 +277,80 @@ test_case "bench_warn_rev1"      "make BENCH=1 WARN=1 REVOCATION=1"
 test_case "dev_san_failfast"     "make PROD=0 SANITIZER_FAIL_FAST=1"
 test_case "prod_info"            "make INFO=1"
 test_case "dev_rev2"             "make PROD=0 REVOCATION=2"
-test_case "invalid_host_prod"    "make HOST=evil.com"
-test_case "invalid_host_bench"   "make BENCH=1 HOST=evil.com"
 
-echo "----- Testing Blocked Builds -----"
+echo "----- Testing Blocked Builds (Security Policy Enforcement) -----"
 test_case "rev0"                 "make REVOCATION=0"
 test_case "debug_prod"           "make DEBUG=1"
 test_case "bench_rev0"           "make BENCH=1 REVOCATION=0"
 test_case "mtls0_prod"           "make mTLS=0"
 test_case "bench_debug_block"    "make BENCH=1 DEBUG=1"
+test_case "invalid_host_prod"    "make HOST=evil.com"
+test_case "invalid_host_bench"   "make BENCH=1 HOST=evil.com"
 
 echo "----- Testing Override Builds (SKIP_SECURITY=1) -----"
+echo "NOTE: SKIP_SECURITY=1 is for CI/test only, TLS still ON. DO NOT ship artifacts built with this override."
 test_case "skip_rev0"            "SKIP_SECURITY=1 make REVOCATION=0"
 test_case "skip_debug"           "SKIP_SECURITY=1 make DEBUG=1"
 test_case "skip_bench_rev0"      "SKIP_SECURITY=1 make BENCH=1 REVOCATION=0"
 test_case "skip_nomtls"          "SKIP_SECURITY=1 make mTLS=0"
 
 # -----------------------------------------------------------------------------
+# Summary JSON
+# -----------------------------------------------------------------------------
+SUMMARY_FILE="$JSON_DIR/summary.json"
+rm -f "$SUMMARY_FILE"
+
+if command -v jq >/dev/null 2>&1; then
+    if ls "$JSON_DIR"/*.json >/dev/null 2>&1; then
+        jq -s --arg ts "$timestamp" '
+          {
+            timestamp: $ts,
+            totals: {
+              success:    (map(select(.status == "PASS")) | length),
+              blocked:    (map(select(.status == "CORRECT-FAIL")) | length),
+              unexpected: (map(select(.status == "FAIL")) | length)
+            },
+            builds: .
+          }
+        ' "$JSON_DIR"/*.json > "$SUMMARY_FILE" \
+        || echo '{"error": "Summary generation failed"}' > "$SUMMARY_FILE"
+        echo "Summary JSON generated: $SUMMARY_FILE"
+    else
+        echo "No per-build JSON files found; summary.json not generated."
+    fi
+else
+    echo "jq not found; generating minimal summary.json without per-build entries."
+    cat > "$SUMMARY_FILE" <<EOF
+{
+  "timestamp": "$(json_escape "$timestamp")",
+  "totals": {
+    "success": $PASS_COUNT,
+    "blocked": $CORRECT_FAIL_COUNT,
+    "unexpected": $FAIL_COUNT
+  },
+  "note": "Generated without jq; per-build details omitted."
+}
+EOF
+    echo "Minimal summary JSON generated: $SUMMARY_FILE"
+fi
+
+# -----------------------------------------------------------------------------
+# Override Audit Check
+# -----------------------------------------------------------------------------
+OVERRIDE_COUNT=$(grep -R "SKIP_SECURITY=1" "$BUILD_LOG_DIR" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$OVERRIDE_COUNT" -gt 0 ]; then
+    echo -e "${YELLOW}Override audit:${RESET} SKIP_SECURITY=1 was used in one or more builds."
+    echo "  This override is for CI/test only; ensure no artifacts built with it are shipped."
+fi
+
+# -----------------------------------------------------------------------------
 # Compliance Summary
 # -----------------------------------------------------------------------------
 echo "================= Build Compliance Summary ================="
-echo "Allowed builds:        $PASS_COUNT PASS / $FAIL_COUNT FAIL"
-echo "Blocked builds:        $CORRECT_FAIL_COUNT CORRECT-FAIL"
-if [ $FAIL_COUNT -eq 0 ]; then
+echo "Successful builds:     $PASS_COUNT"
+echo "Policy-blocked builds: $CORRECT_FAIL_COUNT (CORRECT-FAIL)"
+echo "Unexpected failures:   $FAIL_COUNT"
+if [ "$FAIL_COUNT" -eq 0 ]; then
     echo -e "Audit Compliance:      ${GREEN}FULLY COMPLIANT ✔${RESET}"
 else
     # Also high-contrast for NON-COMPLIANT summary
