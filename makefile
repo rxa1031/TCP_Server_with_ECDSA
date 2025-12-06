@@ -127,7 +127,6 @@ __SKIP_SECURITY__ ?= 0
 # =============================================================================
 ifneq ($(filter clean help ?,$(MAKECMDGOALS)),)
   __SKIP_SECURITY__ := 1
-  PROD := 0
 endif
 
 ifeq ($(__SKIP_SECURITY__),0)
@@ -204,6 +203,7 @@ ifeq ($(BENCH),1)
 MODE_FLAGS   := -D__BENCH__
 MODE_MSG     := BENCH hardened
 CFLAGS_EXTRA := -O2 -pipe -fstack-clash-protection -DNDEBUG
+LDFLAGS_EXTRA :=
 HOST         := $(BENCH_HOST)
 PORT         := $(BENCH_PORT)
 
@@ -355,6 +355,7 @@ help:
 	@echo "  REVOCATION=2 → CRL+OCSP future mode"
 	@echo "  REVOCATION=0 → DEV only / __SKIP_SECURITY__ override"
 	@echo "  $(Y)Tip:$(RS) To disable mTLS: use DEV mode → $(C)make PROD=0 mTLS=0$(RS)"
+	@echo "$(R)  __SKIP_SECURITY__=1 → CI/test only. Disables enforcement checks (TLS still ON). Not for PROD/BENCH artifacts.$(RS)"
 	@echo ""
 	@echo "$(G)Sanitizers (DEV only):$(RS)"
 	@echo "  SANITIZER_FAIL_FAST=1 → Abort immediately"
