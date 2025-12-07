@@ -37,7 +37,7 @@ This project currently supports **CRL-based** certificate revocation.
 
 > 🔎 **OCSP Status**  
 > OCSP is **not implemented yet**.  
-> `REVOCATION_LEVEL__ >= 2` is reserved for future OCSP support.  
+> `__REVOCATION_LEVEL__ >= 2` is reserved for future OCSP support.  
 > DEV mode may experiment with values ≥ 2 — PROD/BENCH builds **reject it**.
 
 ---
