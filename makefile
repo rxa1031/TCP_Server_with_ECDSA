@@ -7,7 +7,7 @@ ifneq ("$(shell tty 2>/dev/null)","")
 Y  := $(shell printf "\033[33m")
 G  := $(shell printf "\033[32m")
 C  := $(shell printf "\033[36m")
-R  := $(shell printf "\033[31m")
+R  := $(shell printf "\033[97;41m")     # White text on RED background (your requirement)
 RS := $(shell printf "\033[0m")
 else
 Y  :=
@@ -24,7 +24,7 @@ endif
 # make PROD=0         → DEV  (Sanitizers + full logs)
 # make BENCH=1        → BENCH (Performance hardened)
 #
-# PROD  = strict security (TLS + mTLS + Host + Revocation enforced)
+# PROD  = strict security (TLS + mTLS + Host + Security Level enforced)
 # DEV   = debugging + testing mode (TLS always ON, mTLS optional — explicit mTLS=0 allowed)
 # BENCH = PROD-like but tuned for performance benchmarking
 #
@@ -39,30 +39,32 @@ PROD := 1
 endif
 
 # =============================================================================
-# mTLS / Certificate Revocation
+# mTLS / Security Level
 # =============================================================================
 # mTLS=1 → Mutual TLS — client certificate required
 # mTLS=0 → Server-auth-only TLS
 #          Allowed ONLY in DEV (PROD=0, BENCH=0)
 #
-# REVOCATION:
-#   0 → Disabled (DEV only or __SKIP_SECURITY__=1)
-#   1 → CRL required (baseline hardened policy)
-#   2 → CRL+OCSP (future enhancement hooks reserved)
+# SECURITY_LEVEL (authentication / revocation strength, TLS always ON):
+#   1 → DEV baseline:
+#        - TLS always ON
+#        - mTLS optional (DEV only)
+#        - CRL optional
+#        - OCSP not used
+#
+#   2 → Hardened baseline (default for PROD/BENCH):
+#        - TLS always ON
+#        - mTLS REQUIRED in PROD/BENCH
+#        - CRL REQUIRED in PROD/BENCH
+#        - OCSP not used (reserved)
+#
+#   3 → Future hardened mode (OCSP + CRL + mTLS)
+#        - Not yet implemented
+#        - Hardened builds (PROD/BENCH) must reject SECURITY_LEVEL>=3
 # =============================================================================
 
-mTLS       ?= 1
-REVOCATION ?= 1
-
-ifeq ($(REVOCATION),0)
-REVOCATION_DESC := 0 (DISABLED — DEV only unless __SKIP_SECURITY__=1)
-else ifeq ($(REVOCATION),1)
-REVOCATION_DESC := 1 (CRL-only — hardened baseline)
-else ifeq ($(REVOCATION),2)
-REVOCATION_DESC := 2 (CRL+OCSP — future hardened mode)
-else
-REVOCATION_DESC := $(REVOCATION) (UNKNOWN — verify input)
-endif
+mTLS           ?= 1
+SECURITY_LEVEL ?= 2   # Default hardened level; DEV will auto-downgrade to 1 if user did not override
 
 # =============================================================================
 # Logging Controls
@@ -74,6 +76,34 @@ endif
 WARN  ?= 0
 INFO  ?= 0
 DEBUG ?= 0
+
+# =============================================================================
+# Certificate Folder + Filenames (Override-Friendly)
+# =============================================================================
+CERT_FOLDER ?= certs
+
+SERVER_CERT ?= server-cert.pem
+SERVER_KEY  ?= server-key.pem
+CA_CERT     ?= ca-cert.pem
+CA_CRL      ?= ca-crl.pem
+
+# Runtime paths (binary runs in ./build → certs are in ../certs)
+SERVER_CERT_PATH = ../$(CERT_FOLDER)/$(SERVER_CERT)
+SERVER_KEY_PATH  = ../$(CERT_FOLDER)/$(SERVER_KEY)
+CA_CERT_PATH     = ../$(CERT_FOLDER)/$(CA_CERT)
+CA_CRL_PATH      = ../$(CERT_FOLDER)/$(CA_CRL)
+
+# Macros exported to C — must follow __NAME__ naming rule
+CERT_DEFS := \
+	-D__CERT_FOLDER__=\"$(CERT_FOLDER)\" \
+	-D__SERVER_CERT_NAME__=\"$(SERVER_CERT)\" \
+	-D__SERVER_KEY_NAME__=\"$(SERVER_KEY)\" \
+	-D__CA_CERT_NAME__=\"$(CA_CERT)\" \
+	-D__CA_CRL_NAME__=\"$(CA_CRL)\" \
+	-D__SERVER_CERT_PATH__=\"$(SERVER_CERT_PATH)\" \
+	-D__SERVER_KEY_PATH__=\"$(SERVER_KEY_PATH)\" \
+	-D__CA_CERT_PATH__=\"$(CA_CERT_PATH)\" \
+	-D__CA_CRL_PATH__=\"$(CA_CRL_PATH)\"
 
 # =============================================================================
 # Sanitizer Behaviour (DEV only)
@@ -129,6 +159,17 @@ ifneq ($(filter clean help ?,$(MAKECMDGOALS)),)
   __SKIP_SECURITY__ := 1
 endif
 
+# =============================================================================
+# DEV-specific default for SECURITY_LEVEL
+#   - If user did NOT explicitly set SECURITY_LEVEL, DEV should default to 1
+#   - PROD/BENCH keep default 2 unless user overrides
+# =============================================================================
+ifeq ($(PROD),0)
+  ifeq ($(origin SECURITY_LEVEL), default)
+    SECURITY_LEVEL := 1
+  endif
+endif
+
 ifeq ($(__SKIP_SECURITY__),0)
 
   # Hardened modes (PROD/BENCH): enforce mTLS ON
@@ -137,9 +178,14 @@ ifeq ($(mTLS),0)
 $(error $(R)Invalid: mTLS=0 is forbidden in PROD/BENCH. Tip: To disable mTLS use: make PROD=0 mTLS=0  (DEV mode only).$(RS))
 endif
 
-  # Hardened modes (PROD/BENCH): revocation must not be disabled
-ifeq ($(REVOCATION),0)
-$(error $(R)Invalid: REVOCATION=0 blocked in PROD/BENCH — CRL enforcement required$(RS))
+  # Hardened modes (PROD/BENCH): SECURITY_LEVEL must be >= 2
+ifeq ($(shell [ $(SECURITY_LEVEL) -ge 2 ] && echo ok || echo bad),bad)
+$(error $(R)Invalid: SECURITY_LEVEL must be >= 2 in PROD/BENCH hardened builds$(RS))
+endif
+
+  # Hardened modes (PROD/BENCH): SECURITY_LEVEL >= 3 (OCSP) not yet supported
+ifeq ($(shell [ $(SECURITY_LEVEL) -ge 3 ] && echo hi || echo ok),hi)
+$(error $(R)Invalid: SECURITY_LEVEL >= 3 is reserved for future OCSP support and is forbidden in PROD/BENCH$(RS))
 endif
 endif
 
@@ -153,27 +199,47 @@ $(error $(R)Invalid: DEBUG allowed only in DEV for secure logging policy$(RS))
 endif
 endif
 
+  # Hardened mode (true PROD only): WARN and INFO must remain disabled
+ifneq ($(PROD),0)
+ifneq ($(BENCH),1)  # True PROD (BENCH also sets PROD=1)
+ifneq ($(WARN),0)
+$(error $(R)Invalid: WARN logging is forbidden in PROD builds$(RS))
+endif
+ifneq ($(INFO),0)
+$(error $(R)Invalid: INFO logging is forbidden in PROD builds$(RS))
+endif
+endif
+endif
+
 endif # __SKIP_SECURITY__
 
 # =============================================================================
 # Certificate Requirement (Hardened builds — skipped only during clean)
 # =============================================================================
 # DEV builds allowed even if missing certs
-# PROD/BENCH require all 3 PEM files to exist
+# PROD/BENCH require full trust chain + CRL = 4 files
 # =============================================================================
 ifneq ($(filter clean,$(MAKECMDGOALS)),)
 # ✓ Clean target → no certificate enforcement
 else ifeq ($(__SKIP_SECURITY__),0)
 ifneq ($(PROD),0)
 
+# Hardened mode → full trust chain (cert + key + CA + CRL) required
 CERT_FILES := \
-	certs/server-cert.pem \
-	certs/server-key.pem \
-	certs/ca-server-cert.pem
+	$(CERT_FOLDER)/$(SERVER_CERT) \
+	$(CERT_FOLDER)/$(SERVER_KEY) \
+	$(CERT_FOLDER)/$(CA_CERT) \
+	$(CERT_FOLDER)/$(CA_CRL)
 
-$(foreach f,$(CERT_FILES), \
-	$(if $(wildcard $(f)),, \
-		$(error $(R)Missing required certificate: $(f)$(RS))))
+MISSING_CERT_FILES := \
+	$(strip $(foreach f,$(CERT_FILES),$(if $(wildcard $(f)),,$(f))))
+
+ifneq ($(MISSING_CERT_FILES),)
+$(error $(R)CRITICAL: Missing certificate/CRL: $(MISSING_CERT_FILES)$(RS) \
+→ Hardened mode (PROD/BENCH): SECURITY_LEVEL>=2 requires full trust chain. \
+→ Fix: Place files under $(CERT_FOLDER)/ OR use DEV mode: make PROD=0)
+endif
+
 endif
 endif
 
@@ -263,10 +329,10 @@ CFLAGS_EXTRA += -D__SKIP_SECURITY__
 HOST          := insecure.local
 endif
 
-# Apply host/port + revocation macros after override
-HOST_DEF        := -D__ALLOWED_HOST__=\"$(HOST)\"
-PORT_DEF        := -D__TLS_PORT__=$(PORT) -D__TLS_PORT_STR__=\"$(PORT)\"
-REVOCATION_DEFS := -D__REVOCATION_LEVEL__=$(REVOCATION)
+# Apply host/port + security macros after override
+HOST_DEF           := -D__ALLOWED_HOST__=\"$(HOST)\"
+PORT_DEF           := -D__TLS_PORT__=$(PORT) -D__TLS_PORT_STR__=\"$(PORT)\"
+SECURITY_LEVEL_DEF := -D__SECURITY_LEVEL__=$(SECURITY_LEVEL)
 
 # =============================================================================
 # C Standard Detection (prefer C23, fallback to C2x)
@@ -294,7 +360,7 @@ ifeq ($(PROD),1)
 LDFLAGS_BASE += -Wl,-z,defs
 endif
 
-CFLAGS  := $(CFLAGS_BASE) $(CFLAGS_EXTRA) $(MODE_FLAGS) $(DEFS_mTLS) $(LOG_DEFS) $(HOST_DEF) $(PORT_DEF) $(REVOCATION_DEFS)
+CFLAGS  := $(CFLAGS_BASE) $(CFLAGS_EXTRA) $(MODE_FLAGS) $(DEFS_mTLS) $(LOG_DEFS) $(HOST_DEF) $(PORT_DEF) $(SECURITY_LEVEL_DEF) $(CERT_DEFS)
 LDFLAGS := $(LDFLAGS_BASE) $(LDFLAGS_EXTRA)
 
 # =============================================================================
@@ -313,8 +379,21 @@ all: $(TARGET)
 ifeq ($(BENCH),1)
 	@echo "$(Y)Note: BENCH hardened — logs may impact timing tests$(RS)"
 endif
+	@echo "TLS:          ON (TLS 1.3 enforced)"
 	@echo "$(mTLS_MSG)"
-	@echo "Revocation:   Level $(REVOCATION) → CRL=$$([[ $(REVOCATION) -ge 1 ]] && echo ON || echo OFF), OCSP=$$([[ $(REVOCATION) -ge 2 ]] && echo ON || echo OFF)"
+	@echo "Security:     Level $(SECURITY_LEVEL) (1=DEV baseline, 2=Hardened, 3=Future OCSP)"
+	@echo "CA Trust:     $(C)$(CA_CERT)$(RS)"
+	@echo "Trust Chain:  server-key.pem + server-cert.pem + ca-cert.pem"
+	@if [ $(SECURITY_LEVEL) -ge 2 ]; then \
+		echo "CRL Status:   $(G)ENFORCED ($(CA_CRL))$(RS)"; \
+	else \
+		echo "CRL Status:   $(Y)DISABLED / not enforced at this level$(RS)"; \
+	fi
+	@if [ $(SECURITY_LEVEL) -ge 3 ]; then \
+		echo "OCSP Status:  $(R)REQUESTED (not implemented; forbidden in PROD/BENCH)$(RS)"; \
+	else \
+		echo "OCSP Status:  OFF (not implemented)"; \
+	fi
 	@echo "Logging:      ERROR=$(G)1$(RS) WARN=$(Y)$(WARN)$(RS) INFO=$(C)$(INFO)$(RS) DEBUG=$(R)$(DEBUG)$(RS)"
 	@echo "Host:         $(HOST)"
 	@echo "Port:         $(PORT)"
@@ -343,41 +422,43 @@ $(TARGET): $(SRCS)
 
 help:
 	@echo "$(Y)==================== Build Help ====================$(RS)"
-	@echo "make             → PROD hardened build (TLS + mTLS + revocation enforced)"
-	@echo "make PROD=0      → DEV build (TLS ALWAYS ON, mTLS optional — explicit mTLS=0 allowed for testing)"
+	@echo "make             → PROD hardened build (TLS + mTLS + SECURITY_LEVEL>=2 enforced)"
+	@echo "make PROD=0      → DEV build (TLS ALWAYS ON, SECURITY_LEVEL=1 default, mTLS optional — explicit mTLS=0 allowed for testing)"
 	@echo "make BENCH=1     → BENCH hardened build (performance + security)"
 	@echo ""
-	@echo "$(G)mTLS / Revocation:$(RS)"
-	@echo "  mTLS=1 (default) → require client cert"
-	@echo "  mTLS=0 → DEV only (server-auth TLS)"
-	@echo "  REVOCATION=1 (default) → CRL policy (hardened baseline)"
-	@echo "  REVOCATION=2 → CRL+OCSP future mode (DEV only; blocked in PROD/BENCH until OCSP implemented)"
-	@echo "  REVOCATION=0 → DEV only / __SKIP_SECURITY__ override (no revocation checks)"
-	@echo "  $(Y)Tip:$(RS) To disable mTLS: use DEV mode → $(C)make PROD=0 mTLS=0$(RS)"
-	@echo "$(Y)  __SKIP_SECURITY__=1 → CI/test only. Disables enforcement checks (TLS still ON). Not for PROD/BENCH artifacts.$(RS)"
+	@echo "$(G)mTLS / Security Level:$(RS)"
+	@echo "  mTLS=1 (default)   → require client cert"
+	@echo "  mTLS=0             → DEV only (server-auth TLS)"
+	@echo "  SECURITY_LEVEL=1   → DEV baseline (TLS ON, mTLS/CRL optional)"
+	@echo "  SECURITY_LEVEL=2   → Hardened baseline (default for PROD/BENCH; mTLS + CRL required)"
+	@echo "  SECURITY_LEVEL>=3  → Reserved for future OCSP (forbidden in PROD/BENCH until implemented)"
+	@echo "  NOTE: CA certificate is ALWAYS required — even when mTLS=0"
+	@echo "  $(Y)Tip:$(RS) To disable mTLS: use DEV mode → $(C)make PROD=0 SECURITY_LEVEL=1 mTLS=0$(RS)"
+	@echo "  __SKIP_SECURITY__=1 → CI/test only. Disables policy enforcement checks (TLS still ON). Not for PROD/BENCH artifacts."
 	@echo ""
 	@echo "$(G)Sanitizers (DEV only):$(RS)"
 	@echo "  SANITIZER_FAIL_FAST=1 → Abort immediately"
 	@echo ""
-	@echo "$(G)Logging Policy:$(RS)"
-	@echo "  WARN, INFO = optional in PROD/BENCH"
-	@echo "  DEBUG = DEV only"
-	@echo "  Default in DEV (no flags): WARN=1 INFO=1 DEBUG=1"
+	@echo "$(G)Default Logging Behaviour (when no flags passed):$(RS)"
+	@echo "  Applies to: make  | make PROD=1 | make PROD=0 | make BENCH=1"
+	@echo "  ------------------+-------------+-------------+-------------"
+	@echo "  Build Mode  ERROR | WARN        | INFO        | DEBUG"
+	@echo "  PROD         ON   | OFF         | OFF         | OFF"
+	@echo "  BENCH        ON   | OFF         | OFF         | OFF"
+	@echo "  DEV          ON   | ON          | ON          | ON"
+	@echo "    Note: \"ON\" = logging enabled by default; \"OFF\" = disabled by default."
 	@echo ""
-	@# ⚠ POLICY REQUIREMENT — DO NOT REMOVE
-	@# Policy Legend v1.5 — mTLS Policy Finalized (TLS always ON)
-	@# Only incorrect information may be removed or corrected — do not delete this block
-	@echo "$(G)Logging (ASCII Matrix):$(RS)"
-	@echo "  Mode   ERROR INFO WARN DEBUG"
-	@echo "  PROD    1     opt  opt   0"
-	@echo "  BENCH   1     opt  opt   0"
-	@echo "  DEV     1     d=1  d=1   d=1"
+	@echo "$(G)Logging Configurability via Makefile Flags:$(RS)"
+	@echo "  Flag / Macro                     | PROD     | BENCH        | DEV"
+	@echo "  ---------------------------------+----------+--------------+-------------"
+	@echo "  WARN=1 / -D__LOG_ENABLE_WARN__   | Blocked  | Configurable | Configurable"
+	@echo "  INFO=1 / -D__LOG_ENABLE_INFO__   | Blocked  | Configurable | Configurable"
+	@echo "  DEBUG=1 / -D__LOG_ENABLE_DEBUG__ | Blocked  | Blocked      | Configurable"
 	@echo ""
-	@echo "Legend:"
-	@echo "  1   = Enabled always"
-	@echo "  0   = Disabled always"
-	@echo "  opt = Optional — enable explicitly in PROD/BENCH"
-	@echo "  d=1 = Auto-enabled in DEV if user gives no flags"
+	@echo "  Security Logging Policy Summary:"
+	@echo "    • PROD  → only ERROR logs allowed (no WARN / INFO / DEBUG)"
+	@echo "    • BENCH → ERROR always; WARN/INFO optional via user config; DEBUG forbidden"
+	@echo "    • DEV   → WARN/INFO/DEBUG all configurable for debugging visibility"
 	@echo ""
 	@echo "$(Y)====================================================$(RS)"
 
