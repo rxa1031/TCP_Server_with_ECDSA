@@ -14,23 +14,65 @@ additional rights to those components. Users must comply with the applicable
 third-party license terms.
 
 ## Build Mode + Logging Enforcement Rules (Policy v1.0)
+## 🔒 Logging Policy & Defaults
 
-| Mode  | TLS | mTLS | Sanitizers | ERROR | WARN | INFO | DEBUG |
-|-------|-----|------|------------|-------|------|------|-------|
-| PROD  | ✔   | ✔    | ❌         | ✔     | opt  | opt  | ❌    |
-| DEV   | ✔   | opt  | ✔ (Opt-B)  | ✔     | ✔    | ✔    | ✔     |
-| BENCH | ✔   | opt  | ❌         | ✔     | ❌    | ❌    | ❌    |
+### Default Logging Behavior (when no flags passed)
+
+| Build Mode | ERROR | WARN | INFO | DEBUG |
+|-----------|:-----:|:----:|:----:|:-----:|
+| **PROD**  | ✅ ON  | ❌ OFF | ❌ OFF | ❌ OFF |
+| **BENCH** | ✅ ON  | ❌ OFF | ❌ OFF | ❌ OFF |
+| **DEV**   | ✅ ON  | ✅ ON  | ✅ ON  | ✅ ON  |
+
+> **Note:** “ON” = logging enabled by default; “OFF” = disabled by default.
+
+---
+
+### Configurable via Makefile Flags
+
+| Flag(s) | PROD | BENCH | DEV | Effect |
+|--------|------|-------|-----|--------|
+| `WARN=1` / `-D__LOG_ENABLE_WARN__` | ❌ Blocked | ✅ Allowed | ✅ Allowed | Enables WARN logs |
+| `INFO=1` / `-D__LOG_ENABLE_INFO__` | ❌ Blocked | ✅ Allowed | ✅ Allowed | Enables INFO logs |
+| `DEBUG=1` / `-D__LOG_ENABLE_DEBUG__` | ❌ Blocked | ❌ Blocked | ✅ Allowed | Enables DEBUG logs (DEV only) |
+| `LOG_ALL=1` (expands to WARN+INFO+DEBUG in DEV) | ❌ Blocked | ❌ Blocked | ✅ Allowed | Enables WARN, INFO, DEBUG (DEV only) |
+
+> 🚨 **Security policy summary**:  
+> * PROD — only ERROR logs allowed (no WARN / INFO / DEBUG)  
+> * BENCH — ERROR always; WARN/INFO disabled in default build and optionally enabled using flags; DEBUG forbidden  
+> * DEV — all logs types enabled by default and optionally controlled by flags
+
+---
+
+### Examples of Allowed / Disallowed Makes
+
+| Make Command | Result |
+|-------------|--------|
+| `make` or `make PROD=1` | PROD defaults → ERROR only |
+| `make BENCH=1` | BENCH defaults → ERROR only |
+| `make BENCH=1 WARN=1 INFO=1` | ERROR + WARN + INFO logs enabled |
+| `make BENCH=1 DEBUG=1` | ❌ Build fails — DEBUG forbidden in BENCH |
+| `make PROD=1 WARN=1` | ❌ Build fails — WARN forbidden in PROD |
+| `make PROD=0` (DEV mode) | All logs by default |
+| `make PROD=0 DEBUG=0 INFO=0 WARN=0` | Only ERROR logs — minimal logs in DEV |
+
+---
+
+### Why This Policy
+
+- **PROD** → Zero-trust hardened deployment, no internal info leakage
+- **BENCH** → Accurate performance testing, no disruptive DEBUG logs
+- **DEV** → Maximum visibility and diagnostics
+
+---
 
 ### Mandatory Hard Rules
 
-- TLS can **never** be disabled
-- mTLS **must** be enabled in hardened builds (PROD/BENCH)
-- **DEBUG is forbidden** in PROD and BENCH builds
-- **BENCH = ERROR-only**
-- Sanitizers only permitted in DEV mode
-
-Any change that violates these rules **must be rejected automatically**  
-and flagged as a **policy violation**.
+- TLS **always enabled** (never plaintext TCP)
+- mTLS **required in PROD and BENCH**
+- **DEBUG forbidden** outside DEV
+- **Sanitizers allowed only in DEV**
+- Invalid combinations must fail hard (Makefile + compile checks)
 
 # TCP_Server_with_ECDSA
 
