@@ -28,7 +28,7 @@ separately by third-party authors. Users must comply with those terms.
 
 Controls certificate **authentication strength** (not TLS encryption).
 
-| SECURITY_LEVEL | mTLS | CRL Check | OCSP Check | Allowed Modes | Notes |
+| SL | mTLS | CRL Check | OCSP Check | Allowed Modes | Notes |
 |---:|:---:|:---:|:---:|---|---|
 | **1** | Optional *(DEV only)* | Optional | Not supported | DEV | Baseline: TLS always ON |
 | **2** *(default for PROD/BENCH)* | Required | Required | Not supported | PROD/BENCH/DEV | Hardened baseline |
@@ -36,14 +36,14 @@ Controls certificate **authentication strength** (not TLS encryption).
 
 ✔ Higher number = stronger security guarantees  
 ✔ Even Level 1 still enforces TLS (server authentication)
-
+✔ SL is short form for Security Level
 ---
 
 #### 🔎 OCSP Status
 
 OCSP support is **not implemented yet**.
 
-- `SECURITY_LEVEL >= 3` is reserved for future OCSP enablement
+- `SL >= 3` is reserved for future OCSP enablement
 - Hardened builds **reject** OCSP requirements until implemented
 
 ---
