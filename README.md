@@ -2,6 +2,17 @@
 All third-party components remain under their original licenses.
 See the [LICENSE](LICENSE) file for full license text.
 
+### Third-Party Licenses
+
+This project uses OpenSSL and may include or depend on libraries and software
+provided by third parties. These components are **licensed separately** by
+their respective authors.
+
+All copyrights, trademarks, and licenses for any third-party software remain
+the property of their owners. Inclusion in this project does not grant
+additional rights to those components. Users must comply with the applicable
+third-party license terms.
+
 ## Build Mode + Logging Enforcement Rules (Policy v1.0)
 
 | Mode  | TLS | mTLS | Sanitizers | ERROR | WARN | INFO | DEBUG |
