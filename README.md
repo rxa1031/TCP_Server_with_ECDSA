@@ -37,6 +37,7 @@ Controls certificate **authentication strength** (not TLS encryption).
 ✔ Higher number = stronger security guarantees  
 ✔ Even Level 1 still enforces TLS (server authentication)
 ✔ SL is short form for Security Level
+
 ---
 
 #### 🔎 OCSP Status
