@@ -35,7 +35,7 @@ Controls certificate **authentication strength** (not TLS encryption).
 | **3** *(future)* | Required | Required | Required | PROD | Highest trust enforcement |
 
 ✔ Higher number = stronger security guarantees  
-✔ Even Level 1 still enforces TLS (server authentication)
+✔ Even Level 1 still enforces TLS (server authentication) 
 ✔ SL is short form for Security Level
 
 ---
