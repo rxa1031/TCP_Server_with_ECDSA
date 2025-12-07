@@ -25,6 +25,23 @@ third-party license terms.
 
 ---
 
+### 🔑 Certificate Revocation Policy
+
+This project currently supports **CRL-based** certificate revocation.
+
+| Build Mode | CRL Required? | Notes |
+|-----------|:-------------:|------|
+| PROD | ✅ Yes | Fail-closed (startup fails if CRL missing/invalid) |
+| BENCH | ✅ Yes | Same as PROD |
+| DEV | ⚠️ Optional | Fail-open allowed for developer convenience |
+
+> 🔎 **OCSP Status**  
+> OCSP is **not implemented yet**.  
+> `REVOCATION_LEVEL__ >= 2` is reserved for future OCSP support.  
+> DEV mode may experiment with values ≥ 2 — PROD/BENCH builds **reject it**.
+
+---
+
 ## 🔒 Logging Policy & Defaults
 
 ### Default Logging Behavior (when no flags passed)
@@ -85,7 +102,22 @@ third-party license terms.
 - mTLS **required in PROD and BENCH**
 - **DEBUG forbidden** outside DEV
 - **Sanitizers allowed only in DEV**
+- OCSP not implemented yet — any `REVOCATION_LEVEL__ >= 2` is rejected in PROD/BENCH
 - Invalid combinations must fail hard (Makefile + compile checks)
+
+---
+
+> 💡 CI/Test Reminder  
+> Only **DEV mode** may build with `REVOCATION_LEVEL__ >= 2`.  
+> Hardened builds must fail if OCSP is attempted before implementation.
+
+---
+
+## 🔭 Hardening Roadmap
+
+- Add OCSP support for real-time revocation (upgrade path from CRL-only model)
+
+---
 
 # TCP_Server_with_ECDSA
 
