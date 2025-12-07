@@ -72,6 +72,17 @@ This project currently supports **CRL-based** certificate revocation.
 
 ---
 
+### Mandatory Hard Rules
+
+- TLS **always enabled** (never plaintext TCP)
+- mTLS **required in PROD and BENCH**
+- **DEBUG forbidden** outside DEV
+- **Sanitizers allowed only in DEV**
+- OCSP not implemented yet — any `REVOCATION_LEVEL__ >= 2` is rejected in PROD/BENCH
+- Invalid combinations must fail hard (Makefile + compile checks)
+
+---
+
 ## Valid Build Commands
 
 | Goal | Command |
@@ -96,16 +107,7 @@ This project currently supports **CRL-based** certificate revocation.
 
 ---
 
-### Mandatory Hard Rules
-
-- TLS **always enabled** (never plaintext TCP)
-- mTLS **required in PROD and BENCH**
-- **DEBUG forbidden** outside DEV
-- **Sanitizers allowed only in DEV**
-- OCSP not implemented yet — any `REVOCATION_LEVEL__ >= 2` is rejected in PROD/BENCH
-- Invalid combinations must fail hard (Makefile + compile checks)
-
----
+### Testing Policy
 
 > 💡 CI/Test Reminder  
 > Only **DEV mode** may build with `REVOCATION_LEVEL__ >= 2`.  
