@@ -1,61 +1,94 @@
 #!/usr/bin/env bash
-#
-# Generates all certificate/key/CRL artifacts required by TCP_Server.c
-# Based strictly on build-policy docs inside server source file.
-#
-
-#!/usr/bin/env bash
 set -euo pipefail
 
-# Always operate inside the script directory (certs/)
+# =============================================================================
+# Usage / Help
+# =============================================================================
+show_help() {
+    echo ""
+    echo "Usage: $0 [MODE]"
+    echo ""
+    echo "MODE options:"
+    echo "  DEV     - Host: localhost  | Port: 8443"
+    echo "  BENCH   - Host: 127.0.0.1  | Port: 443"
+    echo "  PROD    - Host: secure.lab.linux | Port: 443"
+    echo ""
+    echo "Examples:"
+    echo "  $0              (default: DEV)"
+    echo "  $0 DEV"
+    echo "  $0 BENCH"
+    echo "  $0 PROD"
+    echo "  $0 --help"
+    echo ""
+}
+
+# Recognize help flags
+if [[ "${1:-}" =~ ^(--help|-h)$ ]]; then
+    show_help
+    exit 0
+fi
+
+MODE="${1:-DEV}"   # Default MODE = DEV if not provided
+
+# =============================================================================
+# Host + Port Selection
+# =============================================================================
+case "$MODE" in
+    PROD)
+        HOST="secure.lab.linux"
+        PORT="443"
+        ;;
+    BENCH)
+        HOST="127.0.0.1"
+        PORT="443"
+        ;;
+    DEV|*)
+        HOST="localhost"
+        PORT="8443"
+        MODE="DEV"  # Normalize in case of invalid input
+        ;;
+esac
+
+echo "MODE      = $MODE"
+echo "HOSTNAME  = $HOST"
+echo "TLS PORT  = $PORT"
+
+# Always generate into script directory
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+echo "Using certificate directory: $SCRIPT_DIR"
 
-echo "Using cert directory: $SCRIPT_DIR"
 
-# ---------------------------------------------------------------------------
-# Root CA (highly sensitive — NEVER ship private key)
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Root CA (ECDSA)
+# =============================================================================
+echo "==> Generating Root CA key"
+openssl ecparam -name prime256v1 -genkey -noout -out ca-key.pem
 
-if [[ ! -f ca-key.pem ]]; then
-    echo "==> Generating Root CA key"
-    openssl genpkey -algorithm RSA \
-        -pkeyopt rsa_keygen_bits:4096 \
-        -out ca-key.pem
-    chmod 600 ca-key.pem
-else
-    echo "--> Root CA key already exists (skipping)"
-fi
+openssl req -x509 -new \
+    -key ca-key.pem \
+    -sha256 -days 1825 \
+    -subj "/CN=Security-Authority-Root-CA" \
+    -out ca-cert.pem
 
-if [[ ! -f ca-cert.pem ]]; then
-    echo "==> Generating Root CA certificate"
-    openssl req -x509 -new -nodes \
-        -key ca-key.pem \
-        -sha256 -days 1825 \
-        -subj "/CN=Security-Authority-Root-CA" \
-        -out ca-cert.pem
-else
-    echo "--> Root CA certificate already exists (skipping)"
-fi
 
-# ---------------------------------------------------------------------------
-# Server certificate — ALWAYS required
-# ---------------------------------------------------------------------------
-
+# =============================================================================
+# Server certificate
+# =============================================================================
 echo "==> Generating Server key"
-openssl genpkey -algorithm RSA \
-    -pkeyopt rsa_keygen_bits:2048 \
-    -out server-key.pem
+openssl ecparam -name prime256v1 -genkey -noout -out server-key.pem
 
 cat > server-san.ext <<EOF
-subjectAltName=DNS:secure.lab.linux,IP:127.0.0.1
+subjectAltName=DNS:${HOST},IP:127.0.0.1
+extendedKeyUsage = serverAuth
+keyUsage = digitalSignature, keyEncipherment, keyAgreement
 EOF
 
-echo "==> Generating Server CSR"
+echo "==> Server CSR"
 openssl req -new \
     -key server-key.pem \
     -out server.csr \
-    -subj "/CN=secure.lab.linux"
+    -subj "/CN=${HOST}"
 
 echo "==> Signing Server certificate"
 openssl x509 -req -in server.csr \
@@ -66,34 +99,38 @@ openssl x509 -req -in server.csr \
 
 rm -f server.csr server-san.ext
 
-# ---------------------------------------------------------------------------
-# Client certificate — required only when mTLS enabled (default in PROD/BENCH)
-# ---------------------------------------------------------------------------
 
+# =============================================================================
+# Client certificate
+# =============================================================================
 echo "==> Generating Client key"
-openssl genpkey -algorithm RSA \
-    -pkeyopt rsa_keygen_bits:2048 \
-    -out client-key.pem
+openssl ecparam -name prime256v1 -genkey -noout -out client-key.pem
 
-echo "==> Generating Client CSR"
+cat > client-san.ext <<EOF
+subjectAltName=DNS:client.${HOST},IP:127.0.0.1
+extendedKeyUsage = clientAuth
+keyUsage = digitalSignature, keyAgreement
+EOF
+
+echo "==> Client CSR"
 openssl req -new \
     -key client-key.pem \
     -out client.csr \
-    -subj "/CN=Secure-Client"
+    -subj "/CN=client.${HOST}"
 
 echo "==> Signing Client certificate"
 openssl x509 -req -in client.csr \
     -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
     -sha256 -days 825 \
+    -extfile client-san.ext \
     -out client-cert.pem
 
-rm -f client.csr
+rm -f client.csr client-san.ext
 
-# ---------------------------------------------------------------------------
-# CRL — required in SECURITY_LEVEL >= 2 builds (PROD/BENCH)
-# ---------------------------------------------------------------------------
 
-echo "==> Preparing CRL DB"
+# =============================================================================
+# CRL (for hardened modes)
+# =============================================================================
 [[ -f index.txt ]] || touch index.txt
 echo "01" > serial
 
@@ -115,15 +152,15 @@ policy            = policy_any
 commonName        = supplied
 EOF
 
-echo "==> Generating CRL"
 openssl ca -config openssl-ca.cnf -batch -gencrl \
     -out ca-crl.pem \
     -crldays 30
 
+# =============================================================================
 
-echo
-echo "================ DONE ================"
-echo "Generated artifacts:"
-ls -1 *.pem *.srl 2>/dev/null || true
-echo
-echo "CA KEY IS SENSITIVE — MOVE OFF MACHINE FOR REAL PROD!"
+echo "=== CERTIFICATES GENERATED SUCCESSFULLY ==="
+echo "MODE       : ${MODE}"
+echo "HOSTNAME   : ${HOST}"
+echo "TLS PORT   : ${PORT}"
+echo "-------------------------------------------"
+ls -1 *.pem
