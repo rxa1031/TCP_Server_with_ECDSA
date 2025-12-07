@@ -45,26 +45,27 @@ endif
 # mTLS=0 → Server-auth-only TLS
 #          Allowed ONLY in DEV (PROD=0, BENCH=0)
 #
-# SECURITY_LEVEL (authentication / revocation strength, TLS always ON):
-#   1 → DEV baseline:
+# SL → Short form for Security Level (passed to C as __SECURITY_LEVEL__)
+#
+# SL=1 → DEV baseline:
 #        - TLS always ON
-#        - mTLS optional (DEV only)
+#        - mTLS OPTIONAL (DEV only with explicit mTLS=0)
 #        - CRL optional
 #        - OCSP not used
 #
-#   2 → Hardened baseline (default for PROD/BENCH):
+# SL=2 → Hardened baseline (DEFAULT for PROD/BENCH):
 #        - TLS always ON
 #        - mTLS REQUIRED in PROD/BENCH
 #        - CRL REQUIRED in PROD/BENCH
 #        - OCSP not used (reserved)
 #
-#   3 → Future hardened mode (OCSP + CRL + mTLS)
+# SL=3 → Future hardened mode (mTLS + CRL + OCSP)
 #        - Not yet implemented
-#        - Hardened builds (PROD/BENCH) must reject SECURITY_LEVEL>=3
+#        - Hardened builds must REJECT SL>=3
 # =============================================================================
 
-mTLS           ?= 1
-SECURITY_LEVEL ?= 2   # Default hardened level; DEV will auto-downgrade to 1 if user did not override
+mTLS  ?= 1
+SL    ?= 2   # Default hardened security level; DEV will auto-downgrade to 1 if user did not override
 
 # =============================================================================
 # Logging Controls
@@ -85,7 +86,7 @@ DEBUG ?= 0
 #   • Forced to 0 in PROD/BENCH hardened builds
 #   • Exported to C as __MODE_SAN__ (numeric: 0 or 1)
 #
-# HARD_EXIT → Post-detection behavior (only active when SAN=1)
+# EXIT → Post-detection behavior (only active when SAN=1)
 #   • 0 = Continue execution after sanitizer reports issue
 #        → Macro passed: __CONTINUE_ON_ERROR__=1
 #   • 1 = Exit immediately upon sanitizer detection (fail-fast)
@@ -96,8 +97,8 @@ DEBUG ?= 0
 #   - These flags ONLY affect runtime debugging behavior
 #
 # DEV-only debugging aid flags
-SAN ?= 1
-HARD_EXIT ?= 0
+SAN  ?= 1
+EXIT ?= 0
 
 # =============================================================================
 # Certificate Folder + Filenames (Override-Friendly)
@@ -174,13 +175,13 @@ ifneq ($(filter clean help ?,$(MAKECMDGOALS)),)
 endif
 
 # =============================================================================
-# DEV-specific default for SECURITY_LEVEL
-#   - If user did NOT explicitly set SECURITY_LEVEL, DEV should default to 1
+# DEV-specific default for SL
+#   - If user did NOT explicitly set SL, DEV should default to 1
 #   - PROD/BENCH keep default 2 unless user overrides
 # =============================================================================
 ifeq ($(PROD),0)
-  ifeq ($(origin SECURITY_LEVEL), default)
-    SECURITY_LEVEL := 1
+  ifeq ($(origin SL), default)
+    SL := 1
   endif
 endif
 
@@ -192,14 +193,14 @@ ifeq ($(mTLS),0)
 $(error $(R)Invalid: mTLS=0 is forbidden in PROD/BENCH. Tip: To disable mTLS use: make PROD=0 mTLS=0  (DEV mode only).$(RS))
 endif
 
-  # Hardened modes (PROD/BENCH): SECURITY_LEVEL must be >= 2
-ifeq ($(shell [ $(SECURITY_LEVEL) -ge 2 ] && echo ok || echo bad),bad)
-$(error $(R)Invalid: SECURITY_LEVEL must be >= 2 in PROD/BENCH hardened builds$(RS))
+  # Hardened modes (PROD/BENCH): SL must be >= 2
+ifeq ($(shell [ $(SL) -ge 2 ] && echo ok || echo bad),bad)
+$(error $(R)Invalid: SL must be >= 2 in PROD/BENCH hardened builds$(RS))
 endif
 
-  # Hardened modes (PROD/BENCH): SECURITY_LEVEL >= 3 (OCSP) not yet supported
-ifeq ($(shell [ $(SECURITY_LEVEL) -ge 3 ] && echo hi || echo ok),hi)
-$(error $(R)Invalid: SECURITY_LEVEL >= 3 is reserved for future OCSP support and is forbidden in PROD/BENCH$(RS))
+  # Hardened modes (PROD/BENCH): SL >= 3 (OCSP) not yet supported
+ifeq ($(shell [ $(SL) -ge 3 ] && echo hi || echo ok),hi)
+$(error $(R)Invalid: SL >= 3 is reserved for future OCSP support and is forbidden in PROD/BENCH$(RS))
 endif
 endif
 
@@ -250,7 +251,7 @@ MISSING_CERT_FILES := \
 
 ifneq ($(MISSING_CERT_FILES),)
 $(error $(R)CRITICAL: Missing certificate/CRL: $(MISSING_CERT_FILES)$(RS) \
-→ Hardened mode (PROD/BENCH): SECURITY_LEVEL>=2 requires full trust chain. \
+→ Hardened mode (PROD/BENCH): SL>=2 requires full trust chain. \
 → Fix: Place files under $(CERT_FOLDER)/ OR use DEV mode: make PROD=0)
 endif
 
@@ -313,9 +314,9 @@ endif
   # Sanitizer Mode (DEV only)
 ifeq ($(SAN),1)
     CFLAGS_EXTRA  := -g3 -O0 -fsanitize=address,undefined,leak -fno-omit-frame-pointer
-    LDFLAGS_EXTRA := -fsanitize=address,undefined,leak
+		LDFLAGS_EXTRA := -fsanitize=address,undefined,leak
     CFLAGS_EXTRA  += -D__MODE_SAN__=1
-    ifeq ($(HARD_EXIT),1)
+    ifeq ($(EXIT),1)
         CFLAGS_EXTRA += -D__EXIT_ON_ERROR__=1
     else
         CFLAGS_EXTRA += -D__CONTINUE_ON_ERROR__=1
@@ -364,7 +365,7 @@ endif
 # Apply host/port + security macros after override
 HOST_DEF           := -D__ALLOWED_HOST__=\"$(HOST)\"
 PORT_DEF           := -D__TLS_PORT__=$(PORT) -D__TLS_PORT_STR__=\"$(PORT)\"
-SECURITY_LEVEL_DEF := -D__SECURITY_LEVEL__=$(SECURITY_LEVEL)
+SL_DEF := -D__SECURITY_LEVEL__=$(SL)
 
 # =============================================================================
 # C Standard Detection (prefer C23, fallback to C2x)
@@ -392,7 +393,7 @@ ifeq ($(PROD),1)
 LDFLAGS_BASE += -Wl,-z,defs
 endif
 
-CFLAGS  := $(CFLAGS_BASE) $(CFLAGS_EXTRA) $(MODE_FLAGS) $(DEFS_mTLS) $(LOG_DEFS) $(HOST_DEF) $(PORT_DEF) $(SECURITY_LEVEL_DEF) $(CERT_DEFS)
+CFLAGS  := $(CFLAGS_BASE) $(CFLAGS_EXTRA) $(MODE_FLAGS) $(DEFS_mTLS) $(LOG_DEFS) $(HOST_DEF) $(PORT_DEF) $(SL_DEF) $(CERT_DEFS)
 LDFLAGS := $(LDFLAGS_BASE) $(LDFLAGS_EXTRA)
 
 # =============================================================================
@@ -413,15 +414,15 @@ ifeq ($(BENCH),1)
 endif
 	@echo "TLS:          ON (TLS 1.3 enforced)"
 	@echo "$(mTLS_MSG)"
-	@echo "Security:     Level $(SECURITY_LEVEL) (1=DEV baseline, 2=Hardened, 3=Future OCSP)"
+	@echo "Security:     SL=$(SL) (1=TLS, 2=mTLS+CRL (i.e., Hardened), 3=mTLS+CRL+(Future)OCSP)"
 	@echo "CA Trust:     $(C)$(CA_CERT)$(RS)"
 	@echo "Trust Chain:  server-key.pem + server-cert.pem + ca-cert.pem"
-	@if [ $(SECURITY_LEVEL) -ge 2 ]; then \
+	@if [ $(SL) -ge 2 ]; then \
 		echo "CRL Status:   $(G)ENFORCED ($(CA_CRL))$(RS)"; \
 	else \
 		echo "CRL Status:   $(Y)DISABLED / not enforced at this level$(RS)"; \
 	fi
-	@if [ $(SECURITY_LEVEL) -ge 3 ]; then \
+	@if [ $(SL) -ge 3 ]; then \
 		echo "OCSP Status:  $(R)REQUESTED (not implemented; forbidden in PROD/BENCH)$(RS)"; \
 	else \
 		echo "OCSP Status:  OFF (not implemented)"; \
@@ -436,7 +437,7 @@ ifeq ($(__SKIP_SECURITY__),1)
 	@echo "$(R)*** DO NOT DISTRIBUTE BUILDS MADE WITH __SKIP_SECURITY__=1 ***$(RS)"
 endif
 ifeq ($(SAN),1)
-	@echo "Sanitisers: Enabled ($(if $(HARD_EXIT),Exit on first error,Continue after errors))"
+	@echo "Sanitisers: Enabled ($(if $(EXIT),Exit on first error,Continue after errors))"
 else
 	@echo "Sanitisers: Disabled"
 endif
@@ -454,26 +455,26 @@ $(TARGET): $(SRCS)
 
 help:
 	@echo "$(Y)==================== Build Help ====================$(RS)"
-	@echo "make             → PROD hardened build (TLS + mTLS + SECURITY_LEVEL>=2 enforced)"
-	@echo "make PROD=0      → DEV build (TLS ALWAYS ON, SECURITY_LEVEL=1 default, mTLS optional — explicit mTLS=0 allowed for testing)"
-	@echo "make BENCH=1     → BENCH hardened build (performance + security)"
+	@echo "make               → PROD hardened build (TLS + mTLS + SL>=2 enforced)"
+	@echo "make PROD=0        → DEV build (TLS ALWAYS ON, SL=1 default, mTLS optional — explicit mTLS=0 allowed for testing)"
+	@echo "make BENCH=1       → BENCH hardened build (performance + security)"
 	@echo ""
 	@echo "$(G)mTLS / Security Level:$(RS)"
-	@echo "  mTLS=1 (default)   → require client cert"
-	@echo "  mTLS=0             → DEV only (server-auth TLS)"
-	@echo "  SECURITY_LEVEL=1   → DEV baseline (TLS ON, mTLS/CRL optional)"
-	@echo "  SECURITY_LEVEL=2   → Hardened baseline (default for PROD/BENCH; mTLS + CRL required)"
-	@echo "  SECURITY_LEVEL>=3  → Reserved for future OCSP (forbidden in PROD/BENCH until implemented)"
+	@echo "  mTLS=1 (default) → require client cert"
+	@echo "  mTLS=0           → DEV only (server-auth TLS)"
+	@echo "  SL=1             → DEV baseline (TLS ON, mTLS/CRL optional)"
+	@echo "  SL=2             → Hardened baseline (default for PROD/BENCH; mTLS + CRL required)"
+	@echo "  SL>=3            → Reserved for future OCSP (forbidden in PROD/BENCH until implemented)"
 	@echo "  NOTE: CA certificate is ALWAYS required — even when mTLS=0"
-	@echo "  $(Y)Tip:$(RS) To disable mTLS: use DEV mode → $(C)make PROD=0 SECURITY_LEVEL=1 mTLS=0$(RS)"
-	@echo "  __SKIP_SECURITY__=1 → CI/test only. Disables policy enforcement checks (TLS still ON). Not for PROD/BENCH artifacts."
+	@echo "  $(Y)Tip:$(RS) To disable mTLS: use DEV mode → $(C)make PROD=0 SL=1 mTLS=0$(RS)"
+	@echo "  SL=1             → CI/test only. Disables policy enforcement checks (TLS still ON). Not for PROD/BENCH artifacts."
 	@echo ""
 	@echo "$(G)Sanitisers:$(RS)"
 	@echo "  Sanitiser controls apply only when building in DEV mode (PROD=0)."
-	@echo "  SAN=1 → Sanitiser instrumentation enabled (ASan + UBSan + LSan)"
-	@echo "  SAN=0 → Sanitiser instrumentation disabled"
-	@echo "  HARD_EXIT=1 → Exit on first sanitiser error"
-	@echo "  HARD_EXIT=0 (default) → Continue running even after sanitiser detects errors"
+	@echo "  SAN=1            → Sanitiser instrumentation enabled (ASan + UBSan + LSan)"
+	@echo "  SAN=0            → Sanitiser instrumentation disabled"
+	@echo "  EXIT=1           → Exit on first sanitiser error"
+	@echo "  EXIT=0 (default) → Continue running even after sanitiser detects errors"
 	@echo "  Note: SAN is automatically set to 0 in hardened builds (PROD/BENCH)"
 	@echo ""
 	@echo "$(G)Default Logging Behaviour (when no flags passed):$(RS)"
