@@ -60,15 +60,14 @@ This project currently supports **CRL-based** certificate revocation.
 
 | Flag(s) | PROD | BENCH | DEV | Effect |
 |--------|------|-------|-----|--------|
-| `WARN=1` / `-D__LOG_ENABLE_WARN__` | ❌ Blocked | ✅ Allowed | ✅ Allowed | Enables WARN logs |
-| `INFO=1` / `-D__LOG_ENABLE_INFO__` | ❌ Blocked | ✅ Allowed | ✅ Allowed | Enables INFO logs |
-| `DEBUG=1` / `-D__LOG_ENABLE_DEBUG__` | ❌ Blocked | ❌ Blocked | ✅ Allowed | Enables DEBUG logs (DEV only) |
-| `LOG_ALL=1` (expands to WARN+INFO+DEBUG in DEV) | ❌ Blocked | ❌ Blocked | ✅ Allowed | Enables WARN, INFO, DEBUG (DEV only) |
+| `WARN=1` / `-D__LOG_ENABLE_WARN__` | ❌ Blocked | ⚙️ Configurable | ⚙️ Configurable | Enables WARN logs |
+| `INFO=1` / `-D__LOG_ENABLE_INFO__` | ❌ Blocked | ⚙️ Configurable | ⚙️ Configurable | Enables INFO logs |
+| `DEBUG=1` / `-D__LOG_ENABLE_DEBUG__` | ❌ Blocked | ❌ Blocked | ⚙️ Configurable | Enables DEBUG logs (DEV only) |
 
-> 🚨 **Security policy summary**:  
-> * PROD — only ERROR logs allowed (no WARN / INFO / DEBUG)  
-> * BENCH — ERROR always; WARN/INFO disabled in default build and optionally enabled using flags; DEBUG forbidden  
-> * DEV — all logs types enabled by default and optionally controlled by flags
+> 🚨 **Security Logging Policy Summary**  
+> • **PROD** — only **ERROR** logs allowed (no WARN / INFO / DEBUG)  
+> • **BENCH** — **ERROR** always; WARN/INFO optional via user config; DEBUG forbidden  
+> • **DEV** — WARN/INFO/DEBUG all **configurable** for debugging visibility
 
 ---
 
@@ -87,15 +86,15 @@ This project currently supports **CRL-based** certificate revocation.
 
 | Goal | Command |
 |------|---------|
-| Default hardened production build | `make` |
-| Explicit PROD | `make PROD=1` |
-| BENCH build | `make BENCH=1` |
-| DEV build (mTLS on by default) | `make PROD=0` |
-| DEV with mTLS disabled | `make PROD=0 mTLS=0` |
-| DEV with DEBUG logging | `make PROD=0 DEBUG=1` |
-| DEV all logs enabled | `make PROD=0 LOG_ALL=1` |
+| Default hardened production build (PROD, mTLS required, ERROR-only logs) | `make` |
+| Explicit PROD build | `make PROD=1` |
+| BENCH build (mTLS required, ERROR-only logs by default) | `make BENCH=1` |
+| DEV build (mTLS **ON** + WARN/INFO/DEBUG **ON** by default) | `make PROD=0` |
+| DEV with mTLS disabled (server-auth TLS only) | `make PROD=0 mTLS=0` |
+| DEV with only ERROR logging (silence WARN/INFO/DEBUG) | `make PROD=0 WARN=0 INFO=0 DEBUG=0` |
+| DEV with DEBUG disabled | `make PROD=0 DEBUG=0` |
 
-> Any forbidden combination **fails** automatically via Makefile and compile-time checks.
+> Any forbidden combination (for example, `PROD` or `BENCH` with `mTLS=0`, or DEBUG outside DEV) **fails** automatically via Makefile and compile-time checks.
 
 ---
 
