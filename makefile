@@ -78,6 +78,28 @@ INFO  ?= 0
 DEBUG ?= 0
 
 # =============================================================================
+# Sanitizer Controls (DEV mode only)
+# =============================================================================
+# SAN → Enable/Disable Address/Undefined/Leak Sanitizers (ASan + UBSan + LSan)
+#   • Default = 1 in DEV builds (PROD=0)
+#   • Forced to 0 in PROD/BENCH hardened builds
+#   • Exported to C as __MODE_SAN__ (numeric: 0 or 1)
+#
+# HARD_EXIT → Post-detection behavior (only active when SAN=1)
+#   • 0 = Continue execution after sanitizer reports issue
+#        → Macro passed: __CONTINUE_ON_ERROR__=1
+#   • 1 = Exit immediately upon sanitizer detection (fail-fast)
+#        → Macro passed: __EXIT_ON_ERROR__=1
+#
+# NOTE:
+#   - These flags DO NOT impact TLS or mTLS policy
+#   - These flags ONLY affect runtime debugging behavior
+#
+# DEV-only debugging aid flags
+SAN ?= 1
+HARD_EXIT ?= 0
+
+# =============================================================================
 # Certificate Folder + Filenames (Override-Friendly)
 # =============================================================================
 CERT_FOLDER ?= certs
@@ -104,14 +126,6 @@ CERT_DEFS := \
 	-D__SERVER_KEY_PATH__=\"$(SERVER_KEY_PATH)\" \
 	-D__CA_CERT_PATH__=\"$(CA_CERT_PATH)\" \
 	-D__CA_CRL_PATH__=\"$(CA_CRL_PATH)\"
-
-# =============================================================================
-# Sanitizer Behaviour (DEV only)
-# =============================================================================
-# DEV default = Option B → Continue after sanitizer reporting
-# SANITIZER_FAIL_FAST=1 → Option A → Abort immediately (fail-fast)
-# =============================================================================
-SANITIZER_FAIL_FAST ?= 0
 
 # =============================================================================
 # Host and Port Defaults
@@ -262,6 +276,15 @@ LOG_DEFS += -D__LOG_ENABLE_DEBUG__
 endif
 endif
 
+# Enforce: Hardened modes NEVER include sanitizers
+ifneq ($(PROD),0)
+SAN := 0
+endif
+
+ifeq ($(BENCH),1)
+SAN := 0
+endif
+
 # =============================================================================
 # Build Mode Selection (Enable flags + host + port)
 # =============================================================================
@@ -276,8 +299,6 @@ PORT         := $(BENCH_PORT)
 else ifeq ($(PROD),0)
 MODE_FLAGS   := -D__DEV__
 MODE_MSG     := DEV build (debug)
-CFLAGS_EXTRA := -g3 -O0 -fsanitize=address,undefined,leak -fno-omit-frame-pointer
-LDFLAGS_EXTRA := -fsanitize=address,undefined,leak
 HOST         := $(DEV_HOST)
 PORT         := $(DEV_PORT)
 
@@ -290,9 +311,20 @@ LOG_DEFS += -D__LOG_ENABLE_WARN__ -D__LOG_ENABLE_INFO__ -D__LOG_ENABLE_DEBUG__
 endif
 
   # Sanitizer Mode (DEV only)
-CFLAGS_EXTRA += -DMODE_SAN -DSANITIZER_OPTION_B_CONTINUE
-ifeq ($(SANITIZER_FAIL_FAST),1)
-CFLAGS_EXTRA += -DSANITIZER_OPTION_A_ABORT
+ifeq ($(SAN),1)
+    CFLAGS_EXTRA  := -g3 -O0 -fsanitize=address,undefined,leak -fno-omit-frame-pointer
+    LDFLAGS_EXTRA := -fsanitize=address,undefined,leak
+    CFLAGS_EXTRA  += -D__MODE_SAN__=1
+    ifeq ($(HARD_EXIT),1)
+        CFLAGS_EXTRA += -D__EXIT_ON_ERROR__=1
+    else
+        CFLAGS_EXTRA += -D__CONTINUE_ON_ERROR__=1
+    endif
+else
+    # SAN disabled in DEV (rare testing case)
+    CFLAGS_EXTRA := -g3 -O0
+    LDFLAGS_EXTRA :=
+    CFLAGS_EXTRA += -D__MODE_SAN__=0
 endif
 
 else
@@ -403,10 +435,10 @@ ifeq ($(__SKIP_SECURITY__),1)
 	@echo "$(R)*** WARNING: __SKIP_SECURITY__ ENABLED — INSECURE BUILD (CI/TEST ONLY) ***$(RS)"
 	@echo "$(R)*** DO NOT DISTRIBUTE BUILDS MADE WITH __SKIP_SECURITY__=1 ***$(RS)"
 endif
-ifeq ($(SANITIZER_FAIL_FAST),1)
-	@echo "$(R)Sanitizer: FAIL-FAST mode (Option A)$(RS)"
+ifeq ($(SAN),1)
+	@echo "Sanitisers: Enabled ($(if $(HARD_EXIT),Exit on first error,Continue after errors))"
 else
-	@echo "Sanitizer:   Continue after issue (Option B)"
+	@echo "Sanitisers: Disabled"
 endif
 	@echo "$(Y)------------------------------------------------$(RS)"
 
@@ -436,16 +468,21 @@ help:
 	@echo "  $(Y)Tip:$(RS) To disable mTLS: use DEV mode → $(C)make PROD=0 SECURITY_LEVEL=1 mTLS=0$(RS)"
 	@echo "  __SKIP_SECURITY__=1 → CI/test only. Disables policy enforcement checks (TLS still ON). Not for PROD/BENCH artifacts."
 	@echo ""
-	@echo "$(G)Sanitizers (DEV only):$(RS)"
-	@echo "  SANITIZER_FAIL_FAST=1 → Abort immediately"
+	@echo "$(G)Sanitisers:$(RS)"
+	@echo "  Sanitiser controls apply only when building in DEV mode (PROD=0)."
+	@echo "  SAN=1 → Sanitiser instrumentation enabled (ASan + UBSan + LSan)"
+	@echo "  SAN=0 → Sanitiser instrumentation disabled"
+	@echo "  HARD_EXIT=1 → Exit on first sanitiser error"
+	@echo "  HARD_EXIT=0 (default) → Continue running even after sanitiser detects errors"
+	@echo "  Note: SAN is automatically set to 0 in hardened builds (PROD/BENCH)"
 	@echo ""
 	@echo "$(G)Default Logging Behaviour (when no flags passed):$(RS)"
 	@echo "  Applies to: make  | make PROD=1 | make PROD=0 | make BENCH=1"
-	@echo "  ------------------+-------------+-------------+-------------"
-	@echo "  Build Mode  ERROR | WARN        | INFO        | DEBUG"
-	@echo "  PROD         ON   | OFF         | OFF         | OFF"
-	@echo "  BENCH        ON   | OFF         | OFF         | OFF"
-	@echo "  DEV          ON   | ON          | ON          | ON"
+	@echo "  ------------------+-------------+-------------+-------------+-----------"
+	@echo "  Build Mode  ERROR | WARN        | INFO        | DEBUG       | SAN"
+	@echo "  PROD         ON   | OFF         | OFF         | OFF         | 0"
+	@echo "  BENCH        ON   | OFF         | OFF         | OFF         | 0"
+	@echo "  DEV          ON   | ON          | ON          | ON          | 1"
 	@echo "    Note: \"ON\" = logging enabled by default; \"OFF\" = disabled by default."
 	@echo ""
 	@echo "$(G)Logging Configurability via Makefile Flags:$(RS)"
@@ -454,12 +491,13 @@ help:
 	@echo "  WARN=1 / -D__LOG_ENABLE_WARN__   | Blocked  | Configurable | Configurable"
 	@echo "  INFO=1 / -D__LOG_ENABLE_INFO__   | Blocked  | Configurable | Configurable"
 	@echo "  DEBUG=1 / -D__LOG_ENABLE_DEBUG__ | Blocked  | Blocked      | Configurable"
+	@echo "  SAN=1 / -D__MODE_SAN__=1         | Blocked  | Blocked      | Configurable"
 	@echo ""
 	@echo "  Security Logging Policy Summary:"
-	@echo "    • PROD  → only ERROR logs allowed (no WARN / INFO / DEBUG)"
-	@echo "    • BENCH → ERROR always; WARN/INFO optional via user config; DEBUG forbidden"
-	@echo "    • DEV   → WARN/INFO/DEBUG all configurable for debugging visibility"
-	@echo ""
+	@echo "    • PROD  → Hardened build. Logging: ERROR only (WARN/INFO/DEBUG/SAN forbidden)."
+	@echo "    • BENCH → Performance hardened build. Logging: ERROR always; WARN/INFO optional; DEBUG/SAN forbidden."
+	@echo "    • DEV   → Debug/testing build. Logging: ERROR/WARN/INFO/DEBUG/SAN all configurable. Default state for all flags is ON"
+	@echo "    • SAN applies only to DEV builds. Hardened builds (PROD/BENCH) always disable sanitiser instrumentation."
 	@echo "$(Y)====================================================$(RS)"
 
 # =============================================================================
