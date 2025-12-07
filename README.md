@@ -13,7 +13,18 @@ the property of their owners. Inclusion in this project does not grant
 additional rights to those components. Users must comply with the applicable
 third-party license terms.
 
-## Build Mode + Logging Enforcement Rules (Policy v1.0)
+## Build Mode Summary
+
+| Mode  | Purpose | mTLS | Revocation | Logging Defaults | Running Privileges |
+|------|---------|------|------------|-----------------|------------------|
+| **PROD** | Hardened deployment | Required | Required | ERROR only | Must start as root → chroot + drop to www-data |
+| **BENCH** | Performance testing | Required | Required | ERROR only | Must start as root → chroot + drop to www-data |
+| **DEV** | Debug + development | Optional | Optional | ERROR+WARN+INFO+DEBUG | No chroot + sanitizers enabled |
+
+> TLS encryption is **always ON** in all modes (no plaintext allowed).
+
+---
+
 ## 🔒 Logging Policy & Defaults
 
 ### Default Logging Behavior (when no flags passed)
@@ -44,17 +55,19 @@ third-party license terms.
 
 ---
 
-### Examples of Allowed / Disallowed Makes
+## Valid Build Commands
 
-| Make Command | Result |
-|-------------|--------|
-| `make` or `make PROD=1` | PROD defaults → ERROR only |
-| `make BENCH=1` | BENCH defaults → ERROR only |
-| `make BENCH=1 WARN=1 INFO=1` | ERROR + WARN + INFO logs enabled |
-| `make BENCH=1 DEBUG=1` | ❌ Build fails — DEBUG forbidden in BENCH |
-| `make PROD=1 WARN=1` | ❌ Build fails — WARN forbidden in PROD |
-| `make PROD=0` (DEV mode) | All logs by default |
-| `make PROD=0 DEBUG=0 INFO=0 WARN=0` | Only ERROR logs — minimal logs in DEV |
+| Goal | Command |
+|------|---------|
+| Default hardened production build | `make` |
+| Explicit PROD | `make PROD=1` |
+| BENCH build | `make BENCH=1` |
+| DEV build (mTLS on by default) | `make PROD=0` |
+| DEV with mTLS disabled | `make PROD=0 mTLS=0` |
+| DEV with DEBUG logging | `make PROD=0 DEBUG=1` |
+| DEV all logs enabled | `make PROD=0 LOG_ALL=1` |
+
+> Any forbidden combination **fails** automatically via Makefile and compile-time checks.
 
 ---
 
