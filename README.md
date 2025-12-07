@@ -1,15 +1,17 @@
+# TCP_Server_with_ECDSA
+
 🔐 Licensed under Apache License 2.0 — free to use with attribution, no warranty.  
 All third-party components remain under their original licenses.  
 See the [LICENSE](LICENSE) file for full license text.
 
-### Third-Party Licenses
+## Third-Party Licenses
 
 This project uses OpenSSL and may include or depend on software licensed
 separately by third-party authors. Users must comply with those terms.
 
 ---
 
-# Build Mode Summary
+## Build Mode Summary
 
 | Mode | Purpose | mTLS | Security Level | Logging Defaults | Running Privileges |
 |------|---------|------|----------------|-----------------|------------------|
@@ -22,7 +24,7 @@ separately by third-party authors. Users must comply with those terms.
 
 ---
 
-## 🔐 Security Level (Trust Enforcement Policy)
+### 🔐 Security Level (Trust Enforcement Policy)
 
 Controls certificate **authentication strength** (not TLS encryption).
 
@@ -37,7 +39,7 @@ Controls certificate **authentication strength** (not TLS encryption).
 
 ---
 
-### 🔎 OCSP Status
+#### 🔎 OCSP Status
 
 OCSP support is **not implemented yet**.
 
@@ -46,9 +48,23 @@ OCSP support is **not implemented yet**.
 
 ---
 
-## 🔒 Logging Policy
+### 🔬 Sanitizer Policy (DEV-Only Diagnostic Safety)
 
-### Default Logging Behavior (when no flags passed)
+Development builds (`PROD=0`) enable compiler sanitizers for memory safety and undefined behavior detection:
+
+- `-fsanitize=address,undefined`
+- `-fno-omit-frame-pointer`
+- `-g3` (max debug symbols)
+
+✔ Catches buffer overflows, use-after-free, double free, and UB  
+✔ **Completely independent** of logging configuration  
+✔ Used strictly for **development diagnostics** — not deployed security
+
+---
+
+### 🔒 Logging Policy
+
+#### Default Logging Behavior (when no flags passed)
 
 | Build Mode | ERROR | WARN | INFO | DEBUG |
 |-----------|:-----:|:----:|:----:|:-----:|
@@ -60,7 +76,7 @@ OCSP support is **not implemented yet**.
 
 ---
 
-### Configurable via Makefile Flags
+#### Configurable via Makefile Flags
 
 | Flag(s) | PROD | BENCH | DEV | Effect |
 |--------|------|-------|-----|--------|
@@ -68,14 +84,14 @@ OCSP support is **not implemented yet**.
 | `INFO=1` / `-D__LOG_ENABLE_INFO__` | ❌ Blocked | ⚙️ Configurable | ⚙️ Configurable | Enables INFO logs |
 | `DEBUG=1` / `-D__LOG_ENABLE_DEBUG__` | ❌ Blocked | ❌ Blocked | ⚙️ Configurable | Enables DEBUG logs (DEV only) |
 
-### 🚨 Security Logging Summary
+#### 🚨 Security Logging Summary
 - **PROD** → only **ERROR** logs allowed (no WARN / INFO / DEBUG)  
 - **BENCH** → **ERROR** always; WARN/INFO optional (enabled via flag); DEBUG forbidden  
 - **DEV** → All logs configurable for diagnostics  
 
 ---
 
-### Mandatory Hard Rules
+#### Mandatory Hard Rules
 
 - TLS **always enabled** (no plaintext TCP)
 - mTLS **required in PROD and BENCH**
@@ -86,7 +102,7 @@ OCSP support is **not implemented yet**.
 
 ---
 
-## Valid Build Commands
+### Valid Build Commands
 
 | Goal | Command |
 |------|---------|
@@ -102,7 +118,7 @@ OCSP support is **not implemented yet**.
 
 ---
 
-## Why This Policy
+### Why This Policy
 
 - **PROD →** Zero-trust hardened deployment
 - **BENCH →** Hardened behavior, predictable timing
@@ -110,7 +126,7 @@ OCSP support is **not implemented yet**.
 
 ---
 
-## Testing Policy
+### Testing Policy
 
 > CI or static builds may temporarily disable enforcement via:
 > `__SKIP_SECURITY__=1`  
@@ -118,7 +134,7 @@ OCSP support is **not implemented yet**.
 
 ---
 
-## 🔭 Hardening Roadmap
+### 🔭 Hardening Roadmap
 
 - Implement OCSP validation (`SECURITY_LEVEL=3`)
 - Optional:
@@ -128,7 +144,7 @@ OCSP support is **not implemented yet**.
 
 ---
 
-# TCP_Server_with_ECDSA
+## CI Status
 
 [![Build Validation](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/build-validation.yml/badge.svg)](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/build-validation.yml)
 [![Hardened PROD Build](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/hardened-prod.yml/badge.svg)](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/hardened-prod.yml)
