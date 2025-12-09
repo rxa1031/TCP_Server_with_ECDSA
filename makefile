@@ -1,3 +1,16 @@
+# -----------------------------------------------------------------------------
+# mtls_server Makefile (final, audited, dense comments)
+#
+# - Dense documentation included.
+# - Mode selection: only one mode at a time (PROD / DEV / BENCH).
+#   * PROD is default: `make` or `make PROD=1`.
+#   * DEV is `make PROD=0`.
+#   * BENCH is `make BENCH=1` (must be exactly 1; BENCH=0 or BENCH= empty -> error).
+# - Security level (SL) is passed unchanged to compiler as:
+#       -D__SECURITY_LEVEL__=$(SL)
+# - C receives exactly one of: -D__DEV__  OR  -D__PROD__  OR  -D__BENCH__ plus SL.
+# -----------------------------------------------------------------------------
+
 CC := gcc
 
 # =============================================================================
@@ -7,7 +20,7 @@ ifneq ("$(shell tty 2>/dev/null)","")
 Y  := $(shell printf "\033[33m")
 G  := $(shell printf "\033[32m")
 C  := $(shell printf "\033[36m")
-R  := $(shell printf "\033[97;41m")     # White text on RED background (your requirement)
+R  := $(shell printf "\033[97;41m")     # White text on RED background
 RS := $(shell printf "\033[0m")
 else
 Y  :=
@@ -18,90 +31,53 @@ RS :=
 endif
 
 # =============================================================================
-# Build Modes
+# Basic user-facing flags
 # =============================================================================
-# make                → PROD (Hardened default)
-# make PROD=0         → DEV  (Sanitizers + full logs)
-# make BENCH=1        → BENCH (Performance hardened)
-#
-# PROD  = strict security (TLS + mTLS + Host + Security Level enforced)
-# DEV   = debugging + testing mode (TLS always ON, mTLS optional — explicit mTLS=0 allowed)
-# BENCH = PROD-like but tuned for performance benchmarking
-#
-# BENCH implies hardened behavior (treated as PROD for policy checks)
-# =============================================================================
-
 PROD  ?= 1
-BENCH ?= 0
+BENCH ?=
+mTLS  ?= 1
 
-ifeq ($(BENCH),1)
-PROD := 1
+# Validate PROD is 0 or 1
+ifeq ($(filter 0 1,$(PROD)),)
+  $(error $(R)Invalid PROD value '$(PROD)'. PROD must be 1 (default) or 0 to select DEV.$(RS))
 endif
 
 # =============================================================================
-# mTLS / Security Level
+# Security Level SL
 # =============================================================================
-# mTLS=1 → Mutual TLS — client certificate required
-# mTLS=0 → Server-auth-only TLS
-#          Allowed ONLY in DEV (PROD=0, BENCH=0)
-#
-# SL → Short form for Security Level (passed to C as __SECURITY_LEVEL__)
-#
-# SL=1 → DEV baseline:
-#        - TLS always ON
-#        - mTLS OPTIONAL (DEV only with explicit mTLS=0)
-#        - CRL optional
-#        - OCSP not used
-#
-# SL=2 → Hardened baseline (DEFAULT for PROD/BENCH):
-#        - TLS always ON
-#        - mTLS REQUIRED in PROD/BENCH
-#        - CRL REQUIRED in PROD/BENCH
-#        - OCSP not used (reserved)
-#
-# SL=3 → Future hardened mode (mTLS + CRL + OCSP)
-#        - Not yet implemented
-#        - Hardened builds must REJECT SL>=3
+# Use SL as the single source of truth. Pass to C as -D__SECURITY_LEVEL__=$(SL).
+# Defaults:
+#   - DEV (PROD=0): SL defaults to 1 if unset
+#   - PROD/BENCH:   SL defaults to 2 if unset
 # =============================================================================
+ifeq ($(origin SL),undefined)
+  ifeq ($(PROD),0)
+    SL := 1
+  else
+    SL := 2
+  endif
+endif
 
-mTLS  ?= 1
-SL    ?= 2   # Default hardened security level; DEV will auto-downgrade to 1 if user did not override
+# Validate SL is a non-negative integer
+ifeq ($(shell printf "%s\n" "$(SL)" | grep -E '^[0-9]+$$' >/dev/null 2>&1 && echo ok || echo bad),bad)
+  $(error $(R)Invalid SL value '$(SL)'. SL must be a non-negative integer (e.g. 1,2,3).$(RS))
+endif
 
 # =============================================================================
-# Logging Controls
+# Logging controls (0/1)
 # =============================================================================
-# LOG_ERROR is always compiled in the C file (no macro needed)
-# WARN / INFO / DEBUG controlled via Makefile macros below
-# =============================================================================
-
 WARN  ?= 0
 INFO  ?= 0
 DEBUG ?= 0
 
 # =============================================================================
-# Sanitizer Controls (DEV mode only)
+# Sanitizer controls (0/1)
 # =============================================================================
-# SAN → Enable/Disable Address/Undefined/Leak Sanitizers (ASan + UBSan + LSan)
-#   • Default = 1 in DEV builds (PROD=0)
-#   • Forced to 0 in PROD/BENCH hardened builds
-#   • Exported to C as __MODE_SAN__ (numeric: 0 or 1)
-#
-# EXIT → Post-detection behavior (only active when SAN=1)
-#   • 0 = Continue execution after sanitizer reports issue
-#        → Macro passed: __CONTINUE_ON_ERROR__=1
-#   • 1 = Exit immediately upon sanitizer detection (fail-fast)
-#        → Macro passed: __EXIT_ON_ERROR__=1
-#
-# NOTE:
-#   - These flags DO NOT impact TLS or mTLS policy
-#   - These flags ONLY affect runtime debugging behavior
-#
-# DEV-only debugging aid flags
 SAN  ?= 1
 EXIT ?= 0
 
 # =============================================================================
-# Certificate Folder + Filenames (Override-Friendly)
+# Certificate filenames (override friendly)
 # =============================================================================
 CERT_FOLDER ?= certs
 
@@ -110,13 +86,11 @@ SERVER_KEY  ?= server-key.pem
 CA_CERT     ?= ca-cert.pem
 CA_CRL      ?= ca-crl.pem
 
-# Runtime paths (binary runs in ./build → certs are in ../certs)
 SERVER_CERT_PATH = $(CERT_FOLDER)/$(SERVER_CERT)
 SERVER_KEY_PATH  = $(CERT_FOLDER)/$(SERVER_KEY)
 CA_CERT_PATH     = $(CERT_FOLDER)/$(CA_CERT)
 CA_CRL_PATH      = $(CERT_FOLDER)/$(CA_CRL)
 
-# Macros exported to C — must follow __NAME__ naming rule
 CERT_DEFS := \
 	-D__CERT_FOLDER__=\"$(CERT_FOLDER)\" \
 	-D__SERVER_CERT_NAME__=\"$(SERVER_CERT)\" \
@@ -129,317 +103,306 @@ CERT_DEFS := \
 	-D__CA_CRL_PATH__=\"$(CA_CRL_PATH)\"
 
 # =============================================================================
-# Host and Port Defaults
+# Host & ports
 # =============================================================================
 PROD_HOST  ?= secure.lab.linux
 DEV_HOST   ?= localhost
 BENCH_HOST ?= 127.0.0.1
 
 PROD_PORT  ?= 443
-BENCH_PORT ?= 443
 DEV_PORT   ?= 8443
+BENCH_PORT ?= 443
 
 # =============================================================================
-# Security Enforcement: Prevent insecure hardened builds unless overridden
+# Targets that skip certificate checks
 # =============================================================================
-__SKIP_SECURITY__ ?= 0
+SKIP_GOALS := clean help -h --help usage ? policy config
 
 # =============================================================================
-# Canonical mTLS Policy Matrix (Do Not Modify Without Security Review)
+# Validate BENCH presence (must be omitted or BENCH=1). Catch BENCH= / BENCH=0.
+# Use origin to detect command-line provision.
 # =============================================================================
-# TLS: Always ON in all modes (non-negotiable)
-#
-# Build Mode | User Request | Policy Allows? | Final mTLS State | Build Result
-# ---------- | ------------ | -------------- | ---------------- | ------------
-# PROD       | (none)       | N/A            | ON               | PASS
-# PROD       | mTLS=1       | Yes            | ON               | PASS
-# PROD       | mTLS=0       | No             | (Blocked)        | FAIL
-# BENCH      | (none)       | N/A            | ON               | PASS
-# BENCH      | mTLS=1       | Yes            | ON               | PASS
-# BENCH      | mTLS=0       | No             | (Blocked)        | FAIL
-# DEV        | (none)       | Yes            | ON (default)     | PASS
-# DEV        | mTLS=1       | Yes            | ON               | PASS
-# DEV        | mTLS=0       | Yes            | OFF              | PASS
-#
-# Policy Statement:
-#   - TLS ALWAYS enabled
-#   - mTLS required in PROD/BENCH
-#   - mTLS may be disabled ONLY in DEV with explicit mTLS=0
-# =============================================================================
-
-# =============================================================================
-# Always allow cleaning — bypass *all* security enforcement
-# =============================================================================
-ifneq ($(filter clean help ?,$(MAKECMDGOALS)),)
-  __SKIP_SECURITY__ := 1
-endif
-
-# =============================================================================
-# DEV-specific default for SL
-#   - If user did NOT explicitly set SL, DEV should default to 1
-#   - PROD/BENCH keep default 2 unless user overrides
-# =============================================================================
-ifeq ($(PROD),0)
-  ifeq ($(origin SL), default)
-    SL := 1
+ifeq ($(origin BENCH),command line)
+  ifneq ($(BENCH),1)
+    $(error $(R)Invalid BENCH value '$(BENCH)'. BENCH is a mode and must be set exactly as BENCH=1 to enable BENCH mode.$(RS))
   endif
 endif
 
-ifeq ($(__SKIP_SECURITY__),0)
+# =============================================================================
+# Validate boolean flags strictly (0 or 1)
+# =============================================================================
+define _bool_ok
+$(shell printf "%s\n" "$(1)" | grep -E '^(0|1)$$' >/dev/null 2>&1 && echo ok || echo bad)
+endef
 
-  # Hardened modes (PROD/BENCH): enforce mTLS ON
-ifneq ($(PROD),0)
-ifeq ($(mTLS),0)
-$(error $(R)Invalid: mTLS=0 is forbidden in PROD/BENCH. Tip: To disable mTLS use: make PROD=0 mTLS=0  (DEV mode only).$(RS))
+ifeq ($(call _bool_ok,$(WARN)),bad)
+  $(error $(R)Invalid WARN value '$(WARN)'. Allowed: 0 or 1.$(RS))
+endif
+ifeq ($(call _bool_ok,$(INFO)),bad)
+  $(error $(R)Invalid INFO value '$(INFO)'. Allowed: 0 or 1.$(RS))
+endif
+ifeq ($(call _bool_ok,$(DEBUG)),bad)
+  $(error $(R)Invalid DEBUG value '$(DEBUG)'. Allowed: 0 or 1.$(RS))
+endif
+ifeq ($(call _bool_ok,$(SAN)),bad)
+  $(error $(R)Invalid SAN value '$(SAN)'. Allowed: 0 or 1.$(RS))
+endif
+ifeq ($(call _bool_ok,$(EXIT)),bad)
+  $(error $(R)Invalid EXIT value '$(EXIT)'. Allowed: 0 or 1.$(RS))
+endif
+ifeq ($(call _bool_ok,$(mTLS)),bad)
+  $(error $(R)Invalid mTLS value '$(mTLS)'. Allowed: 0 or 1.$(RS))
 endif
 
-  # Hardened modes (PROD/BENCH): SL must be >= 2
-ifeq ($(shell [ $(SL) -ge 2 ] && echo ok || echo bad),bad)
-$(error $(R)Invalid: SL must be >= 2 in PROD/BENCH hardened builds$(RS))
-endif
-
-  # Hardened modes (PROD/BENCH): SL >= 3 (OCSP) not yet supported
-ifeq ($(shell [ $(SL) -ge 3 ] && echo hi || echo ok),hi)
-$(error $(R)Invalid: SL >= 3 is reserved for future OCSP support and is forbidden in PROD/BENCH$(RS))
-endif
-endif
-
-  # Secure logging policy enforcement: DEBUG only allowed in DEV
-ifeq ($(DEBUG),1)
+# =============================================================================
+# Final mode determination (exclusive)
+# - BENCH=1 -> BENCH (must not combine with PROD=0)
+# - else PROD=0 -> DEV
+# - else PROD=1/default -> PROD
+# =============================================================================
 ifeq ($(BENCH),1)
-$(error $(R)Invalid: DEBUG not allowed in BENCH hardened mode$(RS))
-endif
-ifneq ($(PROD),0)
-$(error $(R)Invalid: DEBUG allowed only in DEV for secure logging policy$(RS))
-endif
-endif
-
-  # Hardened mode (true PROD only): WARN and INFO must remain disabled
-ifneq ($(PROD),0)
-ifneq ($(BENCH),1)  # True PROD (BENCH also sets PROD=1)
-ifneq ($(WARN),0)
-$(error $(R)Invalid: WARN logging is forbidden in PROD builds$(RS))
-endif
-ifneq ($(INFO),0)
-$(error $(R)Invalid: INFO logging is forbidden in PROD builds$(RS))
-endif
-endif
-endif
-
-endif # __SKIP_SECURITY__
-
-# =============================================================================
-# Certificate Requirement (Hardened builds — skipped only during clean)
-# =============================================================================
-# DEV builds allowed even if missing certs
-# PROD/BENCH require full trust chain + CRL = 4 files
-# =============================================================================
-ifneq ($(filter clean,$(MAKECMDGOALS)),)
-# ✓ Clean target → no certificate enforcement
-else ifeq ($(__SKIP_SECURITY__),0)
-ifneq ($(PROD),0)
-
-# Hardened mode → full trust chain (cert + key + CA + CRL) required
-CERT_FILES := \
-	$(CERT_FOLDER)/$(SERVER_CERT) \
-	$(CERT_FOLDER)/$(SERVER_KEY) \
-	$(CERT_FOLDER)/$(CA_CERT) \
-	$(CERT_FOLDER)/$(CA_CRL)
-
-MISSING_CERT_FILES := \
-	$(strip $(foreach f,$(CERT_FILES),$(if $(wildcard $(f)),,$(f))))
-
-ifneq ($(MISSING_CERT_FILES),)
-$(error $(R)CRITICAL: Missing certificate/CRL: $(MISSING_CERT_FILES)$(RS) \
-→ Hardened mode (PROD/BENCH): SL>=2 requires full trust chain. \
-→ Fix: Place files under $(CERT_FOLDER)/ OR use DEV mode: make PROD=0)
-endif
-
-endif
+  ifeq ($(PROD),0)
+    $(error $(R)Invalid: BENCH=1 cannot be combined with PROD=0 (DEV mode). Use either BENCH=1 or PROD=0, not both.$(RS))
+  endif
+  MODE := BENCH
+else ifeq ($(PROD),0)
+  MODE := DEV
+else
+  MODE := PROD
 endif
 
 # =============================================================================
-# Logging Macro Flags (LOG_ERROR always compiled in C)
+# Certificate existence checks (only for real build operations)
+# Skip when target is help/clean/policy/config, etc.
 # =============================================================================
-# NOTE: __LOG_ENABLE_ERROR__ included ***only for test script reporting***
+ifneq ($(filter $(SKIP_GOALS),$(MAKECMDGOALS)),)
+  CHECK_CERTS := 0
+else
+  CHECK_CERTS := 1
+endif
+
+ifeq ($(CHECK_CERTS),1)
+  ifneq ($(MODE),DEV)
+    CERT_FILES := $(SERVER_CERT_PATH) $(SERVER_KEY_PATH) $(CA_CERT_PATH) $(CA_CRL_PATH)
+    MISSING_CERTS := $(strip $(foreach f,$(CERT_FILES),$(if $(wildcard $(f)),,$(f))))
+    ifneq ($(MISSING_CERTS),)
+      $(error $(R)CRITICAL: Missing certificate(s): $(MISSING_CERTS)$(RS) \
+-> Hardened mode requires server cert/key + CA cert + CRL. Use DEV (make PROD=0) for testing or place files under $(CERT_FOLDER)/.)
+    endif
+  endif
+endif
+
 # =============================================================================
+# Hardened policy checks (Makefile-level)
+# - mTLS=0 forbidden in PROD/BENCH
+# - SL constraints:
+#     * DEV: SL default 1; SL>=1 allowed; SL>=3 allowed only in DEV
+#     * PROD/BENCH: SL must be >=2 and SL < 3
+# - DEBUG allowed only in DEV
+# - WARN/INFO forbidden in PROD; BENCH allows WARN/INFO when explicitly enabled
+# =============================================================================
+
+ifeq ($(MODE),BENCH)
+  ifeq ($(mTLS),0)
+    $(error $(R)Invalid: mTLS=0 forbidden in BENCH hardened builds. Use DEV (make PROD=0) to disable mTLS.$(RS))
+  endif
+  ifeq ($(shell [ $(SL) -ge 2 ] && echo ok || echo bad),bad)
+    $(error $(R)Invalid: SL must be >= 2 in BENCH hardened builds$(RS))
+  endif
+  ifeq ($(shell [ $(SL) -ge 3 ] && echo hi || echo ok),hi)
+    $(error $(R)Invalid: SL>=3 reserved for OCSP and is forbidden in BENCH hardened builds. Use DEV to test SL>=3$(RS))
+  endif
+endif
+
+ifeq ($(MODE),PROD)
+  ifeq ($(mTLS),0)
+    $(error $(R)Invalid: mTLS=0 forbidden in PROD hardened builds. Use DEV (make PROD=0) to disable mTLS.$(RS))
+  endif
+  ifeq ($(shell [ $(SL) -ge 2 ] && echo ok || echo bad),bad)
+    $(error $(R)Invalid: SL=1 forbidden in PROD hardened builds (requires SL>=2)$(RS))
+  endif
+  ifeq ($(shell [ $(SL) -ge 3 ] && echo hi || echo ok),hi)
+    $(error $(R)Invalid: SL>=3 reserved for OCSP and is forbidden in PROD hardened builds. Use DEV to test SL>=3$(RS))
+  endif
+endif
+
+ifeq ($(DEBUG),1)
+  ifneq ($(MODE),DEV)
+    $(error $(R)Invalid: DEBUG logging is allowed only in DEV builds$(RS))
+  endif
+endif
+
+ifeq ($(MODE),PROD)
+  ifneq ($(WARN),0)
+    $(error $(R)Invalid: WARN logging is forbidden in PROD hardened builds$(RS))
+  endif
+  ifneq ($(INFO),0)
+    $(error $(R)Invalid: INFO logging is forbidden in PROD hardened builds$(RS))
+  endif
+endif
+
+ifeq ($(MODE),BENCH)
+  # BENCH allows WARN/INFO when explicitly set; forbids DEBUG
+  ifneq ($(DEBUG),0)
+    $(error $(R)Invalid: DEBUG logging forbidden in BENCH hardened builds by policy (use DEV for debug)$(RS))
+  endif
+endif
+
+# =============================================================================
+# DEV defaults: if user didn't set WARN/INFO/DEBUG explicitly, enable them in DEV
+# =============================================================================
+ifeq ($(MODE),DEV)
+  ifeq ($(filter 1,$(WARN) $(INFO) $(DEBUG)),)
+    WARN  := 1
+    INFO  := 1
+    DEBUG := 1
+  endif
+endif
+
+# =============================================================================
+# Sanitizer enforcement: disabled for hardened modes
+# =============================================================================
+ifeq ($(MODE),DEV)
+  # keep SAN as configured
+else
+  SAN := 0
+endif
+
+# =============================================================================
+# Build-mode flags & messages (PASS EXACTLY ONE OF __DEV__/__PROD__/__BENCH__ to C)
+# =============================================================================
+ifeq ($(MODE),BENCH)
+  MODE_FLAGS := -D__BENCH__
+  MODE_MSG   := BENCH hardened (performance-focused)
+  HOST       := $(BENCH_HOST)
+  PORT       := $(BENCH_PORT)
+  CFLAGS_EXTRA := -O2 -pipe -fstack-clash-protection -DNDEBUG
+  LDFLAGS_EXTRA :=
+else ifeq ($(MODE),DEV)
+  MODE_FLAGS := -D__DEV__
+  MODE_MSG   := DEV build (debug)
+  HOST       := $(DEV_HOST)
+  PORT       := $(DEV_PORT)
+  ifeq ($(SAN),1)
+    CFLAGS_EXTRA  := -g3 -O0 -fsanitize=address,undefined,leak -fno-omit-frame-pointer
+    LDFLAGS_EXTRA := -fsanitize=address,undefined,leak
+  else
+    CFLAGS_EXTRA  := -g3 -O0
+    LDFLAGS_EXTRA :=
+  endif
+else
+  MODE_FLAGS := -D__PROD__
+  MODE_MSG   := PROD hardened
+  HOST       := $(PROD_HOST)
+  PORT       := $(PROD_PORT)
+  CFLAGS_EXTRA := -O2 -pipe -fstack-clash-protection -DNDEBUG
+  LDFLAGS_EXTRA :=
+endif
+
+# mTLS macro: define or undefine to avoid stale object problem
+ifeq ($(mTLS),1)
+  DEFS_MTLS := -D__REQUIRE_MUTUAL_TLS__
+else
+  DEFS_MTLS := -U__REQUIRE_MUTUAL_TLS__
+endif
+
+# mTLS message for summary
+ifeq ($(mTLS),1)
+  mTLS_MSG := mTLS: ON  (Mutual TLS — client cert required)
+else
+  mTLS_MSG := mTLS: OFF (Server-auth-only TLS; DEV-only)
+endif
+
+# export host/port/SL to C
+HOST_DEF := -D__ALLOWED_HOST__=\"$(HOST)\"
+PORT_DEF := -D__TLS_PORT__=$(PORT) -D__TLS_PORT_STR__=\"$(PORT)\"
+SL_DEF   := -D__SECURITY_LEVEL__=$(SL)
+
+# logging macros
 LOG_DEFS := -D__LOG_ENABLE_ERROR__
-
-ifneq ($(filter 1,$(WARN) $(INFO) $(DEBUG)),)
 ifneq ($(WARN),0)
-LOG_DEFS += -D__LOG_ENABLE_WARN__
+  LOG_DEFS += -D__LOG_ENABLE_WARN__
 endif
 ifneq ($(INFO),0)
-LOG_DEFS += -D__LOG_ENABLE_INFO__
+  LOG_DEFS += -D__LOG_ENABLE_INFO__
 endif
 ifneq ($(DEBUG),0)
-LOG_DEFS += -D__LOG_ENABLE_DEBUG__
-endif
-endif
-
-# Enforce: Hardened modes NEVER include sanitizers
-ifneq ($(PROD),0)
-SAN := 0
-endif
-
-ifeq ($(BENCH),1)
-SAN := 0
+  LOG_DEFS += -D__LOG_ENABLE_DEBUG__
 endif
 
 # =============================================================================
-# Build Mode Selection (Enable flags + host + port)
-# =============================================================================
-ifeq ($(BENCH),1)
-MODE_FLAGS   := -D__BENCH__
-MODE_MSG     := BENCH hardened
-CFLAGS_EXTRA := -O2 -pipe -fstack-clash-protection -DNDEBUG
-LDFLAGS_EXTRA :=
-HOST         := $(BENCH_HOST)
-PORT         := $(BENCH_PORT)
-
-else ifeq ($(PROD),0)
-MODE_FLAGS   := -D__DEV__
-MODE_MSG     := DEV build (debug)
-HOST         := $(DEV_HOST)
-PORT         := $(DEV_PORT)
-
-  # DEV convenience: auto-enable logs when none provided
-ifeq ($(filter 1,$(WARN) $(INFO) $(DEBUG)),)
-WARN  := 1
-INFO  := 1
-DEBUG := 1
-LOG_DEFS += -D__LOG_ENABLE_WARN__ -D__LOG_ENABLE_INFO__ -D__LOG_ENABLE_DEBUG__
-endif
-
-  # Sanitizer Mode (DEV only)
-ifeq ($(SAN),1)
-    CFLAGS_EXTRA  := -g3 -O0 -fsanitize=address,undefined,leak -fno-omit-frame-pointer
-		LDFLAGS_EXTRA := -fsanitize=address,undefined,leak
-    CFLAGS_EXTRA  += -D__MODE_SAN__=1
-    ifeq ($(EXIT),1)
-        CFLAGS_EXTRA += -D__EXIT_ON_ERROR__=1
-    else
-        CFLAGS_EXTRA += -D__CONTINUE_ON_ERROR__=1
-    endif
-else
-    # SAN disabled in DEV (rare testing case)
-    CFLAGS_EXTRA := -g3 -O0
-    LDFLAGS_EXTRA :=
-    CFLAGS_EXTRA += -D__MODE_SAN__=0
-endif
-
-else
-MODE_FLAGS   :=
-MODE_MSG     := PROD hardened
-CFLAGS_EXTRA := -O2 -pipe -fstack-clash-protection -DNDEBUG
-HOST         := $(PROD_HOST)
-PORT         := $(PROD_PORT)
-LDFLAGS_EXTRA :=
-endif
-
-# =============================================================================
-# mTLS Macro Declaration
-# =============================================================================
-ifeq ($(mTLS),1)
-mTLS_MSG  := mTLS: ON  (Mutual TLS — client cert required)
-DEFS_mTLS := -D__REQUIRE_MUTUAL_TLS__
-else
-mTLS_MSG  := mTLS: OFF (Server-auth-only TLS; DEV-only)
-DEFS_mTLS := -U__REQUIRE_MUTUAL_TLS__
-endif
-
-# =============================================================================
-# Security Override Handling (__SKIP_SECURITY__)
-# =============================================================================
-# __SKIP_SECURITY__=1:
-#   - Disables only policy enforcement checks (NOT recommended for deployment).
-#     TLS still ALWAYS ON.
-#   - Allowed ONLY under CI/testing
-#   - Not for operational hardened deployments
-# =============================================================================
-ifeq ($(__SKIP_SECURITY__),1)
-CFLAGS_EXTRA += -D__SKIP_SECURITY__
-HOST          := insecure.local
-endif
-
-# Apply host/port + security macros after override
-HOST_DEF           := -D__ALLOWED_HOST__=\"$(HOST)\"
-PORT_DEF           := -D__TLS_PORT__=$(PORT) -D__TLS_PORT_STR__=\"$(PORT)\"
-SL_DEF := -D__SECURITY_LEVEL__=$(SL)
-
-# =============================================================================
-# C Standard Detection (prefer C23, fallback to C2x)
+# C standard detection and hardening flags
 # =============================================================================
 CHECK_C23 := $(shell printf "int main(){}" | $(CC) -std=c23 -xc - -o /dev/null 2>/dev/null && echo yes)
 CSTD      := $(if $(CHECK_C23),-std=c23,-std=c2x)
 
-# =============================================================================
-# Hardening Flags
-# =============================================================================
 CFLAGS_BASE := \
-	$(CSTD) \
-	-Wall -Wextra -Werror -Wpedantic \
-	-Wformat=2 -Wshadow -Wpointer-arith \
-	-Wcast-align -Wwrite-strings \
-	-Wconversion -Wstrict-prototypes \
-	-D_FORTIFY_SOURCE=2 \
-	-fstack-protector-strong -fPIE
+  $(CSTD) \
+  -Wall -Wextra -Werror -Wpedantic \
+  -Wformat=2 -Wshadow -Wpointer-arith \
+  -Wcast-align -Wwrite-strings \
+  -Wconversion -Wstrict-prototypes \
+  -D_FORTIFY_SOURCE=2 \
+  -fstack-protector-strong -fPIE
 
 LDFLAGS_BASE := \
-	-lssl -lcrypto \
-	-pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
+  -lssl -lcrypto \
+  -pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
 
-ifeq ($(PROD),1)
-LDFLAGS_BASE += -Wl,-z,defs
+ifeq ($(MODE),PROD)
+  LDFLAGS_BASE += -Wl,-z,defs
 endif
 
-CFLAGS  := $(CFLAGS_BASE) $(CFLAGS_EXTRA) $(MODE_FLAGS) $(DEFS_mTLS) $(LOG_DEFS) $(HOST_DEF) $(PORT_DEF) $(SL_DEF) $(CERT_DEFS)
+CFLAGS  := $(CFLAGS_BASE) $(CFLAGS_EXTRA) $(MODE_FLAGS) $(DEFS_MTLS) $(LOG_DEFS) $(HOST_DEF) $(PORT_DEF) $(SL_DEF) $(CERT_DEFS)
 LDFLAGS := $(LDFLAGS_BASE) $(LDFLAGS_EXTRA)
 
 # =============================================================================
-# Sources / Output Directory
+# Sources / Output
 # =============================================================================
 BUILD_DIR := build
 TARGET    := $(BUILD_DIR)/mtls_server
 SRCS      := src/mtls_server.c
 
 # =============================================================================
-# Build Summary + Binary Build
+# Build + summary (OCSP messaging preserved). Also show user-origin for log flags.
 # =============================================================================
+.PHONY: all
 all: $(TARGET)
 	@echo "$(Y)---------------- BUILD SUMMARY ----------------$(RS)"
 	@echo "Mode:         $(C)$(MODE_MSG)$(RS)"
-ifeq ($(BENCH),1)
+ifeq ($(MODE),BENCH)
 	@echo "$(Y)Note: BENCH hardened — logs may impact timing tests$(RS)"
 endif
-	@echo "TLS:          ON (TLS 1.3 enforced)"
-	@echo "$(mTLS_MSG)"
-	@echo "Security:     SL=$(SL) (1=TLS, 2=mTLS+CRL (i.e., Hardened), 3=mTLS+CRL+(Future)OCSP)"
+	@echo "TLS:          ON"
+	@echo "  $(mTLS_MSG)"
+	@echo "Security:     SL=$(SL) (1=TLS, 2=mTLS+CRL (Hardened), 3=mTLS+CRL+(Future)OCSP)"
 	@echo "CA Trust:     $(C)$(CA_CERT)$(RS)"
-	@echo "Trust Chain:  server-key.pem + server-cert.pem + ca-cert.pem"
+	@echo "Trust Chain:  $(SERVER_KEY) + $(SERVER_CERT) + $(CA_CERT)"
 	@if [ $(SL) -ge 2 ]; then \
 		echo "CRL Status:   $(G)ENFORCED ($(CA_CRL))$(RS)"; \
 	else \
 		echo "CRL Status:   $(Y)DISABLED / not enforced at this level$(RS)"; \
 	fi
 	@if [ $(SL) -ge 3 ]; then \
-		echo "OCSP Status:  $(R)REQUESTED (not implemented; forbidden in PROD/BENCH)$(RS)"; \
+		if [ "$(MODE)" = "DEV" ]; then \
+			echo "OCSP Status:  $(Y)RESERVED (not implemented; allowed only in DEV)$(RS)"; \
+		else \
+			echo "OCSP Status:  $(R)ERROR (SL>=3 forbidden in PROD/BENCH)$(RS)"; \
+		fi \
 	else \
 		echo "OCSP Status:  OFF (not implemented)"; \
 	fi
-	@echo "Logging:      ERROR=$(G)1$(RS) WARN=$(Y)$(WARN)$(RS) INFO=$(C)$(INFO)$(RS) DEBUG=$(R)$(DEBUG)$(RS)"
+	@echo "Logging (final): ERROR=$(G)1$(RS) WARN=$(Y)$(WARN)$(RS) INFO=$(C)$(INFO)$(RS) DEBUG=$(R)$(DEBUG)$(RS)"
+	@echo "Logging (source): WARN=$(origin WARN) INFO=$(origin INFO) DEBUG=$(origin DEBUG)"
 	@echo "Host:         $(HOST)"
 	@echo "Port:         $(PORT)"
+	@echo "Cert Folder:  $(CERT_FOLDER)"
 	@echo "Output:       $(TARGET)"
 	@echo "C Standard:   $(CSTD)"
-ifeq ($(__SKIP_SECURITY__),1)
-	@echo "$(R)*** WARNING: __SKIP_SECURITY__ ENABLED — INSECURE BUILD (CI/TEST ONLY) ***$(RS)"
-	@echo "$(R)*** DO NOT DISTRIBUTE BUILDS MADE WITH __SKIP_SECURITY__=1 ***$(RS)"
-endif
 ifeq ($(SAN),1)
-	@echo "Sanitisers: Enabled ($(if $(EXIT),Exit on first error,Continue after errors))"
+	@echo "Sanitisers:   Enabled ($(if $(EXIT),Exit on first error,Continue after errors))"
 else
-	@echo "Sanitisers: Disabled"
+	@echo "Sanitisers:   Disabled"
 endif
 	@echo "$(Y)------------------------------------------------$(RS)"
 
@@ -448,64 +411,105 @@ $(TARGET): $(SRCS)
 	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET) $(LDFLAGS)
 
 # =============================================================================
-# Help — also responds to `make ?`
+# Help / policy / config
 # =============================================================================
-.PHONY: help ?
-? : help
+.PHONY: help usage -h --help ? policy config
 
-help:
-	@echo "$(Y)==================== Build Help ====================$(RS)"
-	@echo "make               → PROD hardened build (TLS + mTLS + SL>=2 enforced)"
-	@echo "make PROD=0        → DEV build (TLS ALWAYS ON, SL=1 default, mTLS optional — explicit mTLS=0 allowed for testing)"
-	@echo "make BENCH=1       → BENCH hardened build (performance + security)"
+help usage -h --help ?:
 	@echo ""
-	@echo "$(G)mTLS / Security Level:$(RS)"
-	@echo "  mTLS=1 (default) → require client cert"
-	@echo "  mTLS=0           → DEV only (server-auth TLS)"
-	@echo "  SL=1             → DEV baseline (TLS ON, mTLS/CRL optional)"
-	@echo "  SL=2             → Hardened baseline (default for PROD/BENCH; mTLS + CRL required)"
-	@echo "  SL>=3            → Reserved for future OCSP (forbidden in PROD/BENCH until implemented)"
-	@echo "  NOTE: CA certificate is ALWAYS required — even when mTLS=0"
-	@echo "  $(Y)Tip:$(RS) To disable mTLS: use DEV mode → $(C)make PROD=0 SL=1 mTLS=0$(RS)"
-	@echo "  SL=1             → CI/test only. Disables policy enforcement checks (TLS still ON). Not for PROD/BENCH artifacts."
+	@echo "$(Y)Usage: make [OPTIONS] [TARGET]$(RS)"
 	@echo ""
-	@echo "$(G)Sanitisers:$(RS)"
-	@echo "  Sanitiser controls apply only when building in DEV mode (PROD=0)."
-	@echo "  SAN=1            → Sanitiser instrumentation enabled (ASan + UBSan + LSan)"
-	@echo "  SAN=0            → Sanitiser instrumentation disabled"
-	@echo "  EXIT=1           → Exit on first sanitiser error"
-	@echo "  EXIT=0 (default) → Continue running even after sanitiser detects errors"
-	@echo "  Note: SAN is automatically set to 0 in hardened builds (PROD/BENCH)"
+	@echo "$(G)Available Targets:$(RS)"
+	@echo "  make                 → Default build (PROD hardened)"
+	@echo "  make clean           → Remove build artifacts"
+	@echo "  make help | -h | --help | ? | usage"
+	@echo "                       → Show this help"
+	@echo "  make policy          → Security & logging rules"
+	@echo "  make config          → Show resolved build configuration"
 	@echo ""
-	@echo "$(G)Default Logging Behaviour (when no flags passed):$(RS)"
-	@echo "  Applies to: make  | make PROD=1 | make PROD=0 | make BENCH=1"
-	@echo "  ------------------+-------------+-------------+-------------+-----------"
-	@echo "  Build Mode  ERROR | WARN        | INFO        | DEBUG       | SAN"
-	@echo "  PROD         ON   | OFF         | OFF         | OFF         | 0"
-	@echo "  BENCH        ON   | OFF         | OFF         | OFF         | 0"
-	@echo "  DEV          ON   | ON          | ON          | ON          | 1"
-	@echo "    Note: \"ON\" = logging enabled by default; \"OFF\" = disabled by default."
+	@echo "$(G)Modes (mutually exclusive):$(RS)"
+	@echo "  PROD (default)       → make  OR make PROD=1  (hardened)"
+	@echo "  DEV                  → make PROD=0 (development; sanitizers & verbose logs)"
+	@echo "  BENCH                → make BENCH=1  (performance-hardened)"
 	@echo ""
-	@echo "$(G)Logging Configurability via Makefile Flags:$(RS)"
-	@echo "  Flag / Macro                     | PROD     | BENCH        | DEV"
-	@echo "  ---------------------------------+----------+--------------+-------------"
-	@echo "  WARN=1 / -D__LOG_ENABLE_WARN__   | Blocked  | Configurable | Configurable"
-	@echo "  INFO=1 / -D__LOG_ENABLE_INFO__   | Blocked  | Configurable | Configurable"
-	@echo "  DEBUG=1 / -D__LOG_ENABLE_DEBUG__ | Blocked  | Blocked      | Configurable"
-	@echo "  SAN=1 / -D__MODE_SAN__=1         | Blocked  | Blocked      | Configurable"
+	@echo "$(G)Important Mode Notes:$(RS)"
+	@echo "  - Only one mode is allowed at a time. Contradictory flags result in a hard error."
+	@echo "  - BENCH must be passed as BENCH=1 to enable BENCH mode. BENCH=0 or any other"
+	@echo "    value is invalid and will cause an error."
 	@echo ""
-	@echo "  Security Logging Policy Summary:"
-	@echo "    • PROD  → Hardened build. Logging: ERROR only (WARN/INFO/DEBUG/SAN forbidden)."
-	@echo "    • BENCH → Performance hardened build. Logging: ERROR always; WARN/INFO optional; DEBUG/SAN forbidden."
-	@echo "    • DEV   → Debug/testing build. Logging: ERROR/WARN/INFO/DEBUG/SAN all configurable. Default state for all flags is ON"
-	@echo "    • SAN applies only to DEV builds. Hardened builds (PROD/BENCH) always disable sanitiser instrumentation."
+	@echo "$(G)Security Level (SL):$(RS)"
+	@echo "  - SL is passed directly to the C compiler as: -D__SECURITY_LEVEL__=$(SL)"
+	@echo "  - DEV defaults to SL=1 if you don't provide SL. You may explicitly set SL=2 or SL=3"
+	@echo "    in DEV for testing (e.g. make PROD=0 SL=3)."
+	@echo "  - PROD/BENCH require SL >= 2 and SL < 3 (SL>=3 is forbidden)."
+	@echo ""
+	@echo "$(G)mTLS / Certificates:$(RS)"
+	@echo "  - mTLS=1 (default) requires client certs. mTLS=0 is allowed only in DEV."
+	@echo "  - Hardened builds (PROD/BENCH) require server cert, server key, CA cert and CRL."
+	@echo ""
+	@echo "$(G)Sanitizers & Debugging:$(RS)"
+	@echo "  - SAN=1 (default in DEV) enables ASan+UBSan+LSan instrumentation."
+	@echo "  - EXIT=1 causes sanitizer fail-fast behavior (only meaningful when SAN=1)."
+	@echo ""
+	@echo "$(G)Logging:$(RS)"
+	@echo "  - ERROR logs are always compiled in for test harness integration."
+	@echo "  - DEV defaults WARN/INFO/DEBUG to ON when not explicitly set by the user."
+	@echo "  - PROD/BENCH disable DEBUG; BENCH can enable WARN/INFO explicitly."
+	@echo ""
+	@echo "Examples:"
+	@echo "  make                  # PROD hardened"
+	@echo "  make PROD=0           # DEV (sanitizers + verbose logs)"
+	@echo "  make PROD=0 SL=3      # DEV with SL=3 (for OCSP development/testing)"
+	@echo "  make BENCH=1          # BENCH hardened (must be BENCH=1 exactly)"
+	@echo ""
+
+policy:
+	@echo "$(Y)==================== Security Policy ====================$(RS)"
+	@echo "mTLS / Security Levels:"
+	@echo "- SL=1: DEV baseline (TLS ON, mTLS optional)"
+	@echo "- SL=2: Hardened baseline (default in PROD/BENCH: mTLS + CRL required)"
+	@echo "- SL>=3: Reserved for future OCSP (not implemented). Allowed in DEV only."
+	@echo ""
+	@echo "Policy Summary:"
+	@echo "- TLS is ALWAYS ON"
+	@echo "- mTLS required in PROD/BENCH; may be disabled only in DEV"
+	@echo "- PROD/BENCH require full trust chain + CRL"
+	@echo ""
+	@echo "$(Y)=============== Sanitizers ===============$(RS)"
+	@echo "SAN=1 → ASan+UBSan+LSan (DEV only)"
+	@echo "EXIT=1 → Fail fast on sanitizer error"
+	@echo "SAN=0 → Disabled (PROD/BENCH always have SAN=0)"
+	@echo ""
+	@echo "$(Y)=============== Logging Policy ===============$(RS)"
+	@echo "| Mode      | ERROR | WARN | INFO | DEBUG | SAN |"
+	@echo "|----------:|:-----:|:----:|:---:|:-----:|:---:|"
+	@echo "| PROD      |  ON   | OFF  | OFF | OFF   |  0  |"
+	@echo "| BENCH     |  ON   | ON*  | ON* | OFF   |  0  |"
+	@echo "| DEV       |  ON   |  ON  |  ON |  ON   |  1  |"
+	@echo ""
+	@echo "* BENCH allows WARN/INFO when explicitly enabled by the user (WARN=1 INFO=1)."
+	@echo "$(Y)====================================================$(RS)"
+
+config:
+	@echo "$(Y)=========== Resolved Build Configuration ===========$(RS)"
+	@echo "Mode:     $(MODE)"
+	@echo "mTLS:     $(mTLS)"
+	@echo "SL:       $(SL)"
+	@echo "SAN:      $(SAN)"
+	@echo "Logging:  ERR=1 WARN=$(WARN) INFO=$(INFO) DEBUG=$(DEBUG)"
+	@echo "Logging source: WARN=$(origin WARN) INFO=$(origin INFO) DEBUG=$(origin DEBUG)"
+	@echo "Host:     $(HOST)"
+	@echo "Port:     $(PORT)"
+	@echo "CertDir:  $(CERT_FOLDER)"
+	@echo "Output:   $(TARGET)"
+	@echo "CFLAGS:   $(CFLAGS)"
+	@echo "LDFLAGS:  $(LDFLAGS)"
 	@echo "$(Y)====================================================$(RS)"
 
 # =============================================================================
 # Clean
 # =============================================================================
 .PHONY: clean
-clean:
 clean:
 	@echo "[CLEAN] Removing build outputs only"
 	@rm -f build/*.o build/*.d build/mtls_server
