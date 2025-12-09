@@ -25,7 +25,6 @@
 //#include <sys/select.h>   /* FD_* macros if used later */
 //#include <openssl/x509_vfy.h>   /* X509_V_FLAG_CRL_CHECK, X509_V_FLAG_CRL_CHECK_ALL */
 //#include <time.h>
-//#include <sys/resource.h> /* setrlimit(), struct rlimit          */
 
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Copyright … */
@@ -42,7 +41,7 @@
 #include <signal.h>
 #include <fcntl.h>        /* fcntl, FD_CLOEXEC */
 #include <pwd.h>          /* getpwnam(), struct passwd           */
-#include <sys/resource.h>
+#include <sys/resource.h> /* setrlimit(), struct rlimit          */
 #include <sys/types.h>
 #include <sys/socket.h>   /* Required for socket functions like socket(), connect(), etc. */
 #include <sys/stat.h>     /* For jail directory permissions etc. */
