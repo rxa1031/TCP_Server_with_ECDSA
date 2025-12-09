@@ -111,10 +111,10 @@ CA_CERT     ?= ca-cert.pem
 CA_CRL      ?= ca-crl.pem
 
 # Runtime paths (binary runs in ./build → certs are in ../certs)
-SERVER_CERT_PATH = ../$(CERT_FOLDER)/$(SERVER_CERT)
-SERVER_KEY_PATH  = ../$(CERT_FOLDER)/$(SERVER_KEY)
-CA_CERT_PATH     = ../$(CERT_FOLDER)/$(CA_CERT)
-CA_CRL_PATH      = ../$(CERT_FOLDER)/$(CA_CRL)
+SERVER_CERT_PATH = $(CERT_FOLDER)/$(SERVER_CERT)
+SERVER_KEY_PATH  = $(CERT_FOLDER)/$(SERVER_KEY)
+CA_CERT_PATH     = $(CERT_FOLDER)/$(CA_CERT)
+CA_CRL_PATH      = $(CERT_FOLDER)/$(CA_CRL)
 
 # Macros exported to C — must follow __NAME__ naming rule
 CERT_DEFS := \
@@ -506,4 +506,7 @@ help:
 # =============================================================================
 .PHONY: clean
 clean:
-	rm -rf $(BUILD_DIR)
+clean:
+	@echo "[CLEAN] Removing build outputs only"
+	@rm -f build/*.o build/*.d build/mtls_server
+	@echo "[CLEAN] Done"
