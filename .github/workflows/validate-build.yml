@@ -19,8 +19,8 @@ jobs:
 
       - name: Run Validation Suite
         run: |
-          chmod +x ./test_builds.sh
-          ./test_builds.sh
+          chmod +x ./tests/test_builds.sh
+          ./tests/test_builds.sh
 
       - name: Display Summary
         run: |
@@ -29,3 +29,4 @@ jobs:
 
     # CI should fail on any unexpected build failures
     continue-on-error: false
+

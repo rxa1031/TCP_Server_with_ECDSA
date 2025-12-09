@@ -32,11 +32,11 @@ jobs:
 
       # Ensure test script is executable
       - name: Make test_builds.sh executable
-        run: chmod +x ./test_builds.sh
+        run: chmod +x ./tests/test_builds.sh
 
       # Run the full build validation matrix
       - name: Run build validation
-        run: ./test_builds.sh
+        run: ./tests/test_builds.sh
 
       # Save build logs as workflow artifacts (useful for audits)
       - name: Upload build logs
@@ -45,3 +45,4 @@ jobs:
         with:
           name: build-logs
           path: build_logs/
+
