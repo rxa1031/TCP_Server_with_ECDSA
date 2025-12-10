@@ -43,27 +43,6 @@ ifeq ($(filter 0 1,$(PROD)),)
 endif
 
 # =============================================================================
-# Security Level SL
-# =============================================================================
-# Use SL as the single source of truth. Pass to C as -D__SECURITY_LEVEL__=$(SL).
-# Defaults:
-#   - DEV (PROD=0): SL defaults to 1 if unset
-#   - PROD/BENCH:   SL defaults to 2 if unset
-# =============================================================================
-ifeq ($(origin SL),undefined)
-  ifeq ($(PROD),0)
-    SL := 1
-  else
-    SL := 2
-  endif
-endif
-
-# Validate SL is a non-negative integer
-ifeq ($(shell printf "%s\n" "$(SL)" | grep -E '^[0-9]+$$' >/dev/null 2>&1 && echo ok || echo bad),bad)
-  $(error $(R)Invalid SL value '$(SL)'. SL must be a non-negative integer (e.g. 1,2,3).$(RS))
-endif
-
-# =============================================================================
 # Logging controls (0/1)
 # =============================================================================
 WARN  ?= 0
@@ -172,8 +151,55 @@ else
 endif
 
 # =============================================================================
+# Security Level SL (unified, single source of truth)
+# =============================================================================
+# SL_DEFAULT is the single authoritative hardened baseline value used by PROD
+# and BENCH — and used as the default in DEV as well.  When OCSP support is
+# enabled in the future, change SL_DEFAULT := 3 and all modes adopt that
+# hardened baseline automatically.
+#
+# Behaviour:
+#  - SL_DEFAULT ?= 2              # default hardened baseline (change to 3 later)
+#  - If user did not set SL on the command-line, SL is set to SL_DEFAULT.
+#  - DEV:
+#      * Defaults to SL_DEFAULT when SL not set.
+#      * User MAY override SL explicitly to one of: 1, 2, 3 (DEV-only).
+#  - PROD and BENCH:
+#      * Default to SL_DEFAULT.
+#      * User MAY NOT override SL — SL must equal SL_DEFAULT exactly.
+#
+# The selected SL is always exported to the C compiler as:
+#   -D__SECURITY_LEVEL__=$(SL)
+# =============================================================================
+SL_DEFAULT ?= 2
+
+ifeq ($(origin SL),undefined)
+  SL := $(SL_DEFAULT)
+endif
+
+ifeq ($(MODE),DEV)
+  # DEV: only values 1,2,3 are accepted (1=TLS-only, 2=mTLS+CRL, 3=future OCSP)
+  ifeq ($(shell printf "%s\n" "$(SL)" | grep -E '^(1|2|3)$$' >/dev/null && echo ok),)
+    $(error $(R)Invalid SL value '$(SL)' for DEV. Allowed values: 1, 2, 3.$(RS))
+  endif
+else
+  # PROD/BENCH: SL must match SL_DEFAULT exactly (no override)
+  ifneq ($(SL),$(SL_DEFAULT))
+    $(error $(R)Invalid SL value '$(SL)' for $(MODE). Allowed: SL=$(SL_DEFAULT) only.$(RS))
+  endif
+endif
+
+# =============================================================================
 # Certificate existence checks (only for real build operations)
 # Skip when target is help/clean/policy/config, etc.
+#
+# IMPORTANT:
+#   - This Makefile DOES NOT generate PEM files.
+#   - PEM generation is done by external scripts.
+#   - In PROD/BENCH, we enforce:
+#       * All PEMs exist
+#       * CN of server certificate matches HOST for MODE
+#       * If CN encodes "host:port", port must match MODE PORT
 # =============================================================================
 ifneq ($(filter $(SKIP_GOALS),$(MAKECMDGOALS)),)
   CHECK_CERTS := 0
@@ -189,6 +215,41 @@ ifeq ($(CHECK_CERTS),1)
       $(error $(R)CRITICAL: Missing certificate(s): $(MISSING_CERTS)$(RS) \
 -> Hardened mode requires server cert/key + CA cert + CRL. Use DEV (make PROD=0) for testing or place files under $(CERT_FOLDER)/.)
     endif
+
+    # OpenSSL CLI is required to perform CN/host/port sanity checks.
+    OPENSSL ?= openssl
+    OPENSSL_AVAILABLE := $(shell command -v $(OPENSSL) >/dev/null 2>&1 && echo yes || echo no)
+    ifeq ($(OPENSSL_AVAILABLE),no)
+      $(error $(R)OpenSSL CLI '$(OPENSSL)' not found. Required for certificate CN/port validation in $(MODE) builds.$(RS))
+    endif
+
+    # Expected HOST/PORT based on selected MODE
+    EXPECTED_HOST := $(if $(filter PROD,$(MODE)),$(PROD_HOST),$(if $(filter BENCH,$(MODE)),$(BENCH_HOST),$(DEV_HOST)))
+    EXPECTED_PORT := $(if $(filter PROD,$(MODE)),$(PROD_PORT),$(if $(filter BENCH,$(MODE)),$(BENCH_PORT),$(DEV_PORT)))
+
+    # Extract CN from server certificate subject (strip everything before CN=
+    # and any trailing components after first '/').
+    SERVER_CN := $(shell $(OPENSSL) x509 -in $(SERVER_CERT_PATH) -noout -subject 2>/dev/null | sed -n 's/^subject=.*CN=//p' | sed 's:/.*::')
+    ifeq ($(strip $(SERVER_CN)),)
+      $(error $(R)Unable to read CN from $(SERVER_CERT_PATH). Check that it is a valid X.509 certificate for $(EXPECTED_HOST).$(RS))
+    endif
+
+    # Split CN into host and optional port (CN may be "host" or "host:port").
+    CN_HOST := $(shell printf "%s\n" "$(SERVER_CN)" | awk -F: '{print $$1}')
+    CN_PORT := $(shell printf "%s\n" "$(SERVER_CN)" | awk -F: 'NF>1 {print $$2}')
+
+    # Host part must match expected host exactly.
+    ifneq ($(CN_HOST),$(EXPECTED_HOST))
+      $(error $(R)Certificate CN mismatch in $(SERVER_CERT_PATH): expected 'CN=$(EXPECTED_HOST)' but found 'CN=$(SERVER_CN)' for $(MODE).$(RS))
+    endif
+
+    # If CN encodes a port, it must match expected TLS port.
+    ifneq ($(strip $(CN_PORT)),)
+      ifneq ($(CN_PORT),$(EXPECTED_PORT))
+        $(error $(R)Certificate CN port mismatch in $(SERVER_CERT_PATH): expected port $(EXPECTED_PORT) for $(MODE) but CN encodes port $(CN_PORT).$(RS))
+      endif
+    endif
+
   endif
 endif
 
@@ -196,8 +257,8 @@ endif
 # Hardened policy checks (Makefile-level)
 # - mTLS=0 forbidden in PROD/BENCH
 # - SL constraints:
-#     * DEV: SL default 1; SL>=1 allowed; SL>=3 allowed only in DEV
-#     * PROD/BENCH: SL must be >=2 and SL < 3
+#     * DEV: SL defaults to SL_DEFAULT (=2) when not set; allowed values 1,2,3
+#     * PROD/BENCH: SL must equal SL_DEFAULT (=2); SL>=3 reserved for OCSP
 # - DEBUG allowed only in DEV
 # - WARN/INFO forbidden in PROD; BENCH allows WARN/INFO when explicitly enabled
 # =============================================================================
@@ -439,9 +500,9 @@ help usage -h --help ?:
 	@echo ""
 	@echo "$(G)Security Level (SL):$(RS)"
 	@echo "  - SL is passed directly to the C compiler as: -D__SECURITY_LEVEL__=$(SL)"
-	@echo "  - DEV defaults to SL=1 if you don't provide SL. You may explicitly set SL=2 or SL=3"
-	@echo "    in DEV for testing (e.g. make PROD=0 SL=3)."
-	@echo "  - PROD/BENCH require SL >= 2 and SL < 3 (SL>=3 is forbidden)."
+	@echo "  - DEV defaults to SL_DEFAULT (=2)"
+	@echo "    DEV allow SL = 1, 2, or 3 (explicit setting)"
+	@echo "  - PROD/BENCH require SL = SL_DEFAULT (=2), (SL=3 i.e., TLS + mTLS + CRL + OCSP pending implementation)"
 	@echo ""
 	@echo "$(G)mTLS / Certificates:$(RS)"
 	@echo "  - mTLS=1 (default) requires client certs. mTLS=0 is allowed only in DEV."
@@ -480,12 +541,17 @@ policy:
 	@echo "EXIT=1 → Fail fast on sanitizer error"
 	@echo "SAN=0 → Disabled (PROD/BENCH always have SAN=0)"
 	@echo ""
+	@echo "$(Y)Note on SAN terminology$(RS)"
+	@echo "SAN (Subject Alternative Name) is an identity-extension field inside X.509 certificates."
+	@echo "It is used for hostname/IP validation in SSL/TLS."
+	@echo "This is unrelated to the SAN flag in this Makefile, which controls sanitizers (ASan/UBSan/LSan)."
+	@echo ""
 	@echo "$(Y)=============== Logging Policy ===============$(RS)"
 	@echo "| Mode      | ERROR | WARN | INFO | DEBUG | SAN |"
-	@echo "|----------:|:-----:|:----:|:---:|:-----:|:---:|"
-	@echo "| PROD      |  ON   | OFF  | OFF | OFF   |  0  |"
-	@echo "| BENCH     |  ON   | ON*  | ON* | OFF   |  0  |"
-	@echo "| DEV       |  ON   |  ON  |  ON |  ON   |  1  |"
+	@echo "|----------:|:-----:|:----:|:----:|:-----:|:---:|"
+	@echo "| PROD      |  ON   | OFF  |  OFF | OFF   |  0  |"
+	@echo "| BENCH     |  ON   | ON*  |  ON* | OFF   |  0  |"
+	@echo "| DEV       |  ON   |  ON  |   ON |  ON   |  1  |"
 	@echo ""
 	@echo "* BENCH allows WARN/INFO when explicitly enabled by the user (WARN=1 INFO=1)."
 	@echo "$(Y)====================================================$(RS)"
