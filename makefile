@@ -189,6 +189,31 @@ else
   endif
 endif
 
+# ---------------------------------------------------------------------
+# Default mTLS behaviour (if the caller did NOT set mTLS on the command line)
+# - DEV SL=1  => default mTLS=0 (useful to test TLS-only by default)
+# - DEV SL>=2 => default mTLS=1 (mTLS + CRL as per SL)
+# - PROD/BENCH => default mTLS=1 (hardened)
+# Caller may still override with "mTLS=0" or "mTLS=1" on the make command line.
+# ---------------------------------------------------------------------
+ifneq ($(origin mTLS),command line)
+  ifeq ($(MODE),DEV)
+    ifeq ($(SL),1)
+      mTLS := 0
+    else
+      mTLS := 1
+    endif
+  else
+    # Hardened modes always enable mTLS by default
+    mTLS := 1
+  endif
+endif
+
+# Re-validate mTLS flag after we may have programmatically changed it above.
+ifeq ($(call _bool_ok,$(mTLS)),bad)
+  $(error $(R)Invalid mTLS value '$(mTLS)'. Allowed: 0 or 1.$(RS))
+endif
+
 # =============================================================================
 # Certificate existence checks (only for real build operations)
 # Skip when target is help/clean/policy/config, etc.
@@ -467,6 +492,14 @@ ifeq ($(SAN),1)
 else
 	@echo "Sanitisers:   Disabled"
 endif
+	@echo ""
+	# Record final build configuration for test harness
+	@echo "__FINAL_MODE__=$(MODE)"        >  build/last_config.mk
+	@echo "__FINAL_SL__=$(SL)"           >> build/last_config.mk
+	@echo "__FINAL_mTLS__=$(mTLS)"       >> build/last_config.mk
+	@echo "__FINAL_WARN__=$(WARN)"       >> build/last_config.mk
+	@echo "__FINAL_INFO__=$(INFO)"       >> build/last_config.mk
+	@echo "__FINAL_DEBUG__=$(DEBUG)"     >> build/last_config.mk
 	@echo "$(Y)------------------------------------------------$(RS)"
 
 $(TARGET): $(SRCS)

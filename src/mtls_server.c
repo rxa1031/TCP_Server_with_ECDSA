@@ -260,8 +260,9 @@ Rules enforced here:
  *        - Allowed only in DEV builds
  *        - PROD/BENCH builds must reject SECURITY_LEVEL >= 3
  *
- * CRL must exist in hardened builds when SECURITY_LEVEL >= 2.
- * In DEV, CRL is optional and failure to configure it only logs a warning.
+ * CRL must exist in hardened builds when SECURITY_LEVEL >= 3.
+ * In DEV, default security level is __SECURITY_LEVEL__ = 1, unless set
+ * explicitly to a higher value. thus CRL is optional and failure to configure it only logs a warning.
  *
  * ---------------------------------------------------------------------------
  * Trust Roles and Dependencies — Visual Trust Chain
@@ -288,7 +289,7 @@ Rules enforced here:
  */
 
 /* ============================================================================
- * REQUIRED CERTIFICATE ARTIFACTS AND EXACT OPENSSL COMMANDS
+ * REQUIRED CERTIFICATE ARTIFACTS AND EXACT OPENSSL COMMANDS (ECDSA)
  * ============================================================================
  *
  * All certificate/key files reside under:
@@ -297,11 +298,11 @@ Rules enforced here:
  *
  * This server requires the following artifacts (filenames fixed by Makefile):
  *
- *   - server-key.pem   → Server private key
- *   - server-cert.pem  → Server X.509 certificate
+ *   - server-key.pem   → Server private key (ECDSA)
+ *   - server-cert.pem  → Server X.509 certificate (signed by CA)
  *   - ca-cert.pem      → Certificate Authority – public trust anchor
  *   - ca-crl.pem       → Certificate Revocation List (required in hardened modes)
- *   - client-key.pem   → Client private key (mTLS only)
+ *   - client-key.pem   → Client private key (ECDSA, mTLS only)
  *   - client-cert.pem  → Client certificate (mTLS only)
  *
  * Runtime Requirements Per Build Mode
@@ -327,54 +328,58 @@ Rules enforced here:
  *   - In DEV: missing optional files logs warnings but server runs for testing.
  *
  * ---------------------------------------------------------------------------
- * CERTIFICATE GENERATION (OpenSSL CLI)
+ * CERTIFICATE GENERATION (OpenSSL CLI) — ECDSA (prime256v1 / P-256)
+ * ---------------------------------------------------------------------------
  *
  * Execute these commands from: <repo-root>/certs/
  *
+ * RATIONALE:
+ *   - Your server ciphers use ECDHE-ECDSA; therefore CA, server and client
+ *     keys must be ECDSA keys (not RSA). We recommend prime256v1 (P-256).
+ *   - SAN must include the hostnames/IPs your clients will use (SNI + HTTP Host).
+ *
  * 1) Root CA (one-time)
  * --------------------
- *   openssl genpkey -algorithm RSA -out ca-key.pem -pkeyopt rsa_keygen_bits:4096
+ *   # Generate CA private key (ECDSA P-256)
+ *   openssl ecparam -name prime256v1 -genkey -noout -out ca-key.pem
  *
- *   openssl req -x509 -new -nodes \
- *       -key ca-key.pem \
- *       -sha256 -days 1825 \
- *       -subj "/CN=Security-Authority-Root-CA" \
- *       -out ca-cert.pem
+ *   # Self-signed CA certificate (e.g. 5 years)
+ *   openssl req -x509 -new -key ca-key.pem -sha256 -days 1825 \
+ *       -subj "/CN=Security-Authority-Root-CA" -out ca-cert.pem
  *
  *
  * 2) Server Certificate (required in ALL MODES)
  * --------------------------------------------
- *   openssl genpkey -algorithm RSA \
- *       -out server-key.pem -pkeyopt rsa_keygen_bits:2048
+ *   # Generate EC server key
+ *   openssl ecparam -name prime256v1 -genkey -noout -out server-key.pem
  *
- *   # Create SAN extension file for modern hostname validation
+ *   # Create SAN extension file — adjust names/IPs per your Makefile mode
  *   cat > server-san.ext <<EOF
  *   subjectAltName=DNS:secure.lab.linux,IP:127.0.0.1
  *   EOF
  *
- *   openssl req -new \
- *       -key server-key.pem \
- *       -out server.csr \
+ *   # Create CSR
+ *   openssl req -new -key server-key.pem -out server.csr \
  *       -subj "/CN=secure.lab.linux"
  *
+ *   # Sign server certificate with CA (shorter validity for servers is OK)
  *   openssl x509 -req -in server.csr \
  *       -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
- *       -out server-cert.pem -days 825 -sha256 \
- *       -extfile server-san.ext
+ *       -out server-cert.pem -days 825 -sha256 -extfile server-san.ext
  *
  *   rm -f server.csr server-san.ext
  *
  *
  * 3) Client Certificate (ONLY when mTLS is enabled)
  * ------------------------------------------------
- *   openssl genpkey -algorithm RSA \
- *       -out client-key.pem -pkeyopt rsa_keygen_bits:2048
+ *   # Generate EC client key
+ *   openssl ecparam -name prime256v1 -genkey -noout -out client-key.pem
  *
- *   openssl req -new \
- *       -key client-key.pem \
- *       -out client.csr \
+ *   # Create CSR for client
+ *   openssl req -new -key client-key.pem -out client.csr \
  *       -subj "/CN=Secure-Client"
  *
+ *   # Sign client certificate with CA
  *   openssl x509 -req -in client.csr \
  *       -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
  *       -out client-cert.pem -days 825 -sha256
@@ -382,33 +387,25 @@ Rules enforced here:
  *   rm -f client.csr
  *
  *
- * 4) Certificate Revocation List (required in PROD/BENCH)
- * ------------------------------------------------------
- *   # First-time CRL database requirements
+ * 4) Certificate Revocation List (required in PROD/BENCH or SECURITY_LEVEL>=2)
+ * ----------------------------------------------------------------------------
+ *   # Initialize CA db for openssl ca (one-time in certs/)
  *   touch index.txt
  *   echo 01 > serial
  *
- *   openssl ca -gencrl \
- *       -keyfile ca-key.pem \
- *       -cert ca-cert.pem \
- *       -out ca-crl.pem \
- *       -crldays 30
+ *   # Create CRL (validity chosen as example)
+ *   openssl ca -gencrl -keyfile ca-key.pem -cert ca-cert.pem -out ca-crl.pem -crldays 30
  *
  *
  * ---------------------------------------------------------------------------
- * SECURITY RATIONALE
- *
- *  - CA_CERT acts as trust anchor for both server and clients
- *  - CRL ensures revoked clients cannot connect (fail-closed in PROD/BENCH)
- *  - SAN must match the SNI / Host used by clients (hostname validation)
- *  - Client certs are required in hardened deployments (identity enforcement)
- *
+ * SECURITY RATIONALE & MANAGEMENT NOTES
  * ---------------------------------------------------------------------------
- * MANAGEMENT NOTES
- *
- *  - NEVER distribute ca-key.pem (private key)
- *  - Store CA private key offline; use separate signing host in production
- *  - Always regenerate CRL before shipping hardened builds
+ *  - CA private key (ca-key.pem) must be protected and kept offline for real production.
+ *  - SAN entries must match the SNI and the __ALLOWED_HOST__ used by clients.
+ *  - Use ECDSA keys so server uses ECDHE-ECDSA suites; do NOT generate RSA keys.
+ *  - SERVER REQUIRES (always): server-key.pem, server-cert.pem, ca-cert.pem
+ *  - SECURITY_LEVEL >= 2: requires ca-crl.pem (revocation enforced at runtime).
+ *  - mTLS=1: client-key.pem + client-cert.pem required for client-side authentication.
  *
  * ============================================================================
  */
@@ -1155,7 +1152,7 @@ Makefile configurations.
 
 /**
 ===============================================================================
-HOST ENFORCEMENT AND ALLOWED HOSTS
+HOST ENFORCEMENT, ALLOWED HOSTS, AND TESTING GUIDE (ECDSA-consistent)
 ===============================================================================
 
 The Makefile sets __ALLOWED_HOST__ at compile time, using:
@@ -1184,114 +1181,90 @@ Runtime behavior:
 
 TLS hostname verification:
 
-    - When mTLS=1 (mutual TLS), TLS-layer hostname verification is enabled.
+    - When mTLS=1 (mutual TLS), TLS-layer hostname verification is enabled
+      (the code calls SSL_set1_host()).
     - When mTLS=0, only HTTP-level Host checks (as above) apply.
 
 ===============================================================================
-TESTING GUIDE (OPENSSL S_CLIENT EXAMPLES, PORT 443)
+TESTING GUIDE (OPENSSL S_CLIENT EXAMPLES, PORT 443) — ECDSA KEYS
 ===============================================================================
 
 All examples assume:
-
     - Server listens on port 443.
     - Server certificate:    server-cert.pem
-    - Server private key:    key.pem
-    - CA bundle on both sides: ca-cert.pem
+    - Server private key:    server-key.pem
+    - CA certificate (trust anchor): ca-cert.pem
+    - Client certificate/key (mTLS): client-cert.pem / client-key.pem
+
+Notes:
+    - Use the ECDSA private keys generated above (prime256v1).
+    - s_client will negotiate ECDHE-ECDSA suites automatically when server
+      and CA/certs are ECDSA-capable.
+    - Use -tls1_3 to force TLS1.3 (if testing 1.3 behavior), or omit to let
+      OpenSSL select the best supported protocol.
 
 DEV mode, mTLS=1 (mutual TLS, all logs enabled):
-
     Build:
-
         make PROD=0 mTLS=1
-
     Test:
-
         openssl s_client -connect 127.0.0.1:443 \
             -servername localhost \
             -cert client-cert.pem -key client-key.pem \
             -CAfile ca-cert.pem -crlf -tls1_3
-
     HTTP request:
-
         GET / HTTP/1.1
         Host: localhost
-
-        <press Enter twice to complete headers>
-
+        <press Enter twice>
     Expected:
-
-        - TLS handshake succeeds if client certificate is valid and trusted.
-        - HTTP/1.1 200 OK is returned.
-        - If Host is not "localhost", a warning is logged, but request proceeds.
+        - TLS handshake succeeds if client certificate chains to ca-cert.pem.
+        - TLS uses ECDHE-ECDSA cipher suites (server & client use ECDSA keys).
+        - If Host != "localhost", DEV logs a warning but allows request.
 
 PROD mode, mTLS=1 (mutual TLS, strict host enforcement):
-
     Build:
-
         make PROD=1 mTLS=1 WARN=1 INFO=1
-
     Test:
-
         openssl s_client -connect 127.0.0.1:443 \
             -servername secure.lab.linux \
             -cert client-cert.pem -key client-key.pem \
             -CAfile ca-cert.pem -crlf -tls1_3
-
     HTTP request:
-
         GET / HTTP/1.1
         Host: secure.lab.linux
-
-        <press Enter twice to complete headers>
-
+        <press Enter twice>
     Expected:
-
-        - TLS handshake succeeds only if:
+        - TLS handshake succeeds only when:
             * client-cert.pem chains to ca-cert.pem, and
-            * the server certificate SAN/CN matches "secure.lab.linux".
-        - HTTP/1.1 200 OK is returned.
-        - If Host does not match __ALLOWED_HOST__, the server returns HTTP 400.
+            * server-cert.pem includes SAN/CN matching "secure.lab.linux".
+        - Server enforces Host header strictly and returns HTTP 400 if mismatch.
 
 BENCH mode, mTLS=0 (server-auth TLS, minimal logging):
-
     Build:
-
         make BENCH=1 mTLS=0 INFO=1
-
     Test:
-
         openssl s_client -connect 127.0.0.1:443 \
             -servername 127.0.0.1 \
             -CAfile ca-cert.pem -crlf -tls1_3
-
     HTTP request:
-
         GET / HTTP/1.1
         Host: 127.0.0.1
-
-        <press Enter twice to complete headers>
-
+        <press Enter twice>
     Expected:
-
-        - TLS handshake succeeds using server certificate only.
-        - Client certificate is not requested.
-        - Host header is logged, but not enforced.
+        - TLS handshake succeeds using server’s ECDSA certificate only.
+        - Client is not required to present a certificate.
+        - Host header is logged but not enforced.
 
 Negative tests (expected failures):
-
     1) Missing client certificate with mTLS=1:
         - Build with mTLS=1.
         - Run s_client without -cert/-key.
-        - Handshake must fail due to missing client auth.
-
+        - Handshake must fail (server rejects connection).
     2) Wrong -servername with mTLS=1:
         - Supply a name not present in server certificate SAN/CN.
-        - TLS hostname verification must fail.
-
+        - TLS hostname verification must fail (SSL_set1_host enforces TLS identity).
     3) Wrong Host header in PROD:
         - Use Host different from __ALLOWED_HOST__.
-        - Response must be HTTP 400 "Host not allowed!".
-
+        - Server returns HTTP 400 "Host not allowed!".
 */
 
 /**
