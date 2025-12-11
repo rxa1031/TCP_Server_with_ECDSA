@@ -216,6 +216,8 @@ ifeq ($(CHECK_CERTS),1)
 -> Hardened mode requires server cert/key + CA cert + CRL. Use DEV (make PROD=0) for testing or place files under $(CERT_FOLDER)/.)
     endif
 
+
+
     # OpenSSL CLI is required to perform CN/host/port sanity checks.
     OPENSSL ?= openssl
     OPENSSL_AVAILABLE := $(shell command -v $(OPENSSL) >/dev/null 2>&1 && echo yes || echo no)
