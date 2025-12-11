@@ -1,166 +1,141 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =============================================================================
-# Usage / Help
-# =============================================================================
-show_help() {
-    echo ""
-    echo "Usage: $0 [MODE]"
-    echo ""
-    echo "MODE options:"
-    echo "  DEV     - Host: localhost  | Port: 8443"
-    echo "  BENCH   - Host: 127.0.0.1  | Port: 443"
-    echo "  PROD    - Host: secure.lab.linux | Port: 443"
-    echo ""
-    echo "Examples:"
-    echo "  $0              (default: DEV)"
-    echo "  $0 DEV"
-    echo "  $0 BENCH"
-    echo "  $0 PROD"
-    echo "  $0 --help"
-    echo ""
-}
+CERT_DIR="certs"
+mkdir -p "$CERT_DIR"
+cd "$CERT_DIR"
 
-# Recognize help flags
-if [[ "${1:-}" =~ ^(--help|-h)$ ]]; then
-    show_help
-    exit 0
+MODE="${1:-}"
+
+if [[ -z "$MODE" ]]; then
+    echo "Usage: $0 DEV | PROD | BENCH"
+    exit 1
 fi
 
-MODE="${1:-DEV}"   # Default MODE = DEV if not provided
-
-# =============================================================================
-# Host + Port Selection
-# =============================================================================
 case "$MODE" in
+    DEV)
+        HOST="localhost"
+        PORT="8443"
+        DAYS=30
+        ;;
     PROD)
         HOST="secure.lab.linux"
         PORT="443"
+        DAYS=730
         ;;
     BENCH)
         HOST="127.0.0.1"
         PORT="443"
+        DAYS=730
         ;;
-    DEV|*)
-        HOST="localhost"
-        PORT="8443"
-        MODE="DEV"  # Normalize in case of invalid input
+    *)
+        echo "ERROR: Mode must be DEV, PROD, or BENCH"
+        exit 1
         ;;
 esac
 
-echo "MODE      = $MODE"
-echo "HOSTNAME  = $HOST"
-echo "TLS PORT  = $PORT"
+echo "Generating certificates for $MODE"
+echo "Host: $HOST"
+echo "Port: $PORT"
+echo
 
-# Always generate into script directory
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
-echo "Using certificate directory: $SCRIPT_DIR"
+# Cleanup
+rm -f server-key.pem server-cert.pem server.csr \
+      ca-key.pem ca-cert.pem ca-crl.pem \
+      ca-cert.srl ca-index.txt ca-serial ca-crlnumber
 
+OPENSSL=$(command -v openssl)
 
-# =============================================================================
-# Root CA (ECDSA)
-# =============================================================================
-echo "==> Generating Root CA key"
-openssl ecparam -name prime256v1 -genkey -noout -out ca-key.pem
+# ---------------------------------------------------------
+# CA
+# ---------------------------------------------------------
+echo "[1] Creating CA key"
+$OPENSSL genrsa -out ca-key.pem 4096 >/dev/null
 
-openssl req -x509 -new \
+echo "[2] Creating CA certificate"
+$OPENSSL req -x509 -new -nodes \
     -key ca-key.pem \
-    -sha256 -days 1825 \
-    -subj "/CN=Security-Authority-Root-CA" \
+    -sha256 -days "$DAYS" \
+    -subj "/CN=Test-CA" \
     -out ca-cert.pem
 
+# ---------------------------------------------------------
+# Server cert
+# ---------------------------------------------------------
+echo "[3] Creating server key"
+$OPENSSL genrsa -out server-key.pem 4096 >/dev/null
 
-# =============================================================================
-# Server certificate
-# =============================================================================
-echo "==> Generating Server key"
-openssl ecparam -name prime256v1 -genkey -noout -out server-key.pem
+TMP_CFG=$(mktemp)
 
-cat > server-san.ext <<EOF
-subjectAltName=DNS:${HOST},IP:127.0.0.1
-extendedKeyUsage = serverAuth
-keyUsage = digitalSignature, keyEncipherment, keyAgreement
+cat > "$TMP_CFG" <<EOF
+[ req ]
+prompt = no
+distinguished_name = dn
+req_extensions = ext
+
+[ dn ]
+CN = ${HOST}:${PORT}
+
+[ ext ]
+subjectAltName = @san
+
+[ san ]
+DNS.1 = ${HOST}
 EOF
 
-echo "==> Server CSR"
-openssl req -new \
+echo "[4] Creating server CSR"
+$OPENSSL req -new \
     -key server-key.pem \
     -out server.csr \
-    -subj "/CN=${HOST}"
+    -config "$TMP_CFG"
 
-echo "==> Signing Server certificate"
-openssl x509 -req -in server.csr \
-    -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
-    -sha256 -days 825 \
-    -extfile server-san.ext \
-    -out server-cert.pem
+echo "Signing server certificate"
+$OPENSSL x509 -req \
+    -in server.csr \
+    -CA ca-cert.pem \
+    -CAkey ca-key.pem \
+    -CAcreateserial \
+    -out server-cert.pem \
+    -days "$DAYS" \
+    -sha256 \
+    -extfile "$TMP_CFG" \
+    -extensions ext
 
-rm -f server.csr server-san.ext
+rm -f "$TMP_CFG" server.csr ca-cert.srl
 
+# ---------------------------------------------------------
+# CRL
+# ---------------------------------------------------------
+echo "Preparing CA database"
+echo -n > ca-index.txt
+echo 01 > ca-serial
+echo 01 > ca-crlnumber
 
-# =============================================================================
-# Client certificate
-# =============================================================================
-echo "==> Generating Client key"
-openssl ecparam -name prime256v1 -genkey -noout -out client-key.pem
-
-cat > client-san.ext <<EOF
-subjectAltName=DNS:client.${HOST},IP:127.0.0.1
-extendedKeyUsage = clientAuth
-keyUsage = digitalSignature, keyAgreement
-EOF
-
-echo "==> Client CSR"
-openssl req -new \
-    -key client-key.pem \
-    -out client.csr \
-    -subj "/CN=client.${HOST}"
-
-echo "==> Signing Client certificate"
-openssl x509 -req -in client.csr \
-    -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
-    -sha256 -days 825 \
-    -extfile client-san.ext \
-    -out client-cert.pem
-
-rm -f client.csr client-san.ext
-
-
-# =============================================================================
-# CRL (for hardened modes)
-# =============================================================================
-[[ -f index.txt ]] || touch index.txt
-echo "01" > serial
-
-cat > openssl-ca.cnf <<EOF
+echo "Generating CRL"
+$OPENSSL ca -gencrl \
+    -keyfile ca-key.pem -cert ca-cert.pem \
+    -out ca-crl.pem \
+    -crldays 30 \
+    -config <(
+        cat <<EOF
 [ ca ]
 default_ca = CA_default
 
 [ CA_default ]
-dir               = .
-database          = index.txt
+database = ca-index.txt
 new_certs_dir     = .
+serial = ca-serial
+crlnumber = ca-crlnumber
 certificate       = ca-cert.pem
 private_key       = ca-key.pem
-serial            = serial
 default_md        = sha256
-policy            = policy_any
-
-[ policy_any ]
-commonName        = supplied
 EOF
+    )
 
-openssl ca -config openssl-ca.cnf -batch -gencrl \
-    -out ca-crl.pem \
-    -crldays 30
-
-# =============================================================================
-
-echo "=== CERTIFICATES GENERATED SUCCESSFULLY ==="
-echo "MODE       : ${MODE}"
-echo "HOSTNAME   : ${HOST}"
-echo "TLS PORT   : ${PORT}"
-echo "-------------------------------------------"
-ls -1 *.pem
+echo
+echo "Certificates generated:"
+echo "  server-key.pem"
+echo "  server-cert.pem"
+echo "  ca-cert.pem"
+echo "  ca-crl.pem"
+echo
