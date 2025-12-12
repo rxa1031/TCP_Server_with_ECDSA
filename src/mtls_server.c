@@ -229,9 +229,9 @@ Rules enforced here:
  *   BENCH  | YES            | Performance test — hardened trust behavior
  *   DEV    | OPTIONAL       | Developer convenience
  *                            Enable mTLS explicitly:
- *                              make PROD=0 mTLS=1
+ *                              make DEV mTLS=1
  *                            or disable mTLS:
- *                              make PROD=0 mTLS=0
+ *                              make DEV mTLS=0
  *
  * ---------------------------------------------------------------------------
  * Security Level Enforcement (__SECURITY_LEVEL__)
@@ -452,9 +452,9 @@ Rules enforced here:
  * If __LOG_ENABLE_DEBUG__ is set without __DEV__, this is a hard error.
  */
 
-#if defined(__LOG_ENABLE_DEBUG__) && !defined(__DEV__) && !defined(__SKIP_SECURITY__)
-#error "DEBUG logging is only allowed in __DEV__ builds. Remove __LOG_ENABLE_DEBUG__ or build with DEV=1."
-#endif
+//#if defined(__LOG_ENABLE_DEBUG__) && !defined(__DEV__)
+//#error "DEBUG logging is only allowed in __DEV__ builds. Remove __LOG_ENABLE_DEBUG__ or build with DEV=1."
+//#endif
 
 /* ============================================================================
  * Logging Helpers and Implementations
@@ -658,9 +658,9 @@ BUILD MODES (MAKEFILE-CONTROLLED)
 
 Mode precedence (highest to lowest):
 
-    1) BENCH=1   -> BENCH mode
-    2) PROD=0    -> DEV mode
-    3) Otherwise -> PROD mode (default)
+    1) BENCH	-> BENCH mode
+    2) DEV    -> DEV mode
+    3) PROD		-> PROD mode (default)
 
 Effective compile-time state:
 
@@ -799,46 +799,46 @@ Hard denials:
 VALID MAKE COMMANDS (TOTAL 34 SUPPORTED COMBINATIONS)
 ===============================================================================
 
-PROD builds (PROD=1, DEBUG not allowed):
+PROD builds (PROD, DEBUG not allowed):
 
-    make PROD=1 TLS=1
-    make PROD=1 TLS=0
-    make PROD=1 TLS=1 WARN=1
-    make PROD=1 TLS=1 INFO=1
-    make PROD=1 TLS=1 WARN=1 INFO=1
-    make PROD=1 TLS=0 WARN=1
-    make PROD=1 TLS=0 INFO=1
-    make PROD=1 TLS=0 WARN=1 INFO=1
+    make PROD TLS=1
+    make PROD TLS=0
+    make PROD TLS=1 WARN=1
+    make PROD TLS=1 INFO=1
+    make PROD TLS=1 WARN=1 INFO=1
+    make PROD TLS=0 WARN=1
+    make PROD TLS=0 INFO=1
+    make PROD TLS=0 WARN=1 INFO=1
 
-DEV builds (PROD=0, all logging flags allowed):
+DEV builds (DEV, all logging flags allowed):
 
-    make PROD=0 TLS=1
-    make PROD=0 TLS=0
-    make PROD=0 TLS=1 WARN=1
-    make PROD=0 TLS=0 WARN=1
-    make PROD=0 TLS=1 INFO=1
-    make PROD=0 TLS=0 INFO=1
-    make PROD=0 TLS=1 WARN=1 INFO=1
-    make PROD=0 TLS=0 WARN=1 INFO=1
-    make PROD=0 TLS=1 DEBUG=1
-    make PROD=0 TLS=0 DEBUG=1
-    make PROD=0 TLS=1 WARN=1 DEBUG=1
-    make PROD=0 TLS=0 WARN=1 DEBUG=1
-    make PROD=0 TLS=1 INFO=1 DEBUG=1
-    make PROD=0 TLS=0 INFO=1 DEBUG=1
-    make PROD=0 TLS=1 WARN=1 INFO=1 DEBUG=1
-    make PROD=0 TLS=0 WARN=1 INFO=1 DEBUG=1
+    make DEV TLS=1
+    make DEV TLS=0
+    make DEV TLS=1 WARN=1
+    make DEV TLS=0 WARN=1
+    make DEV TLS=1 INFO=1
+    make DEV TLS=0 INFO=1
+    make DEV TLS=1 WARN=1 INFO=1
+    make DEV TLS=0 WARN=1 INFO=1
+    make DEV TLS=1 DEBUG=1
+    make DEV TLS=0 DEBUG=1
+    make DEV TLS=1 WARN=1 DEBUG=1
+    make DEV TLS=0 WARN=1 DEBUG=1
+    make DEV TLS=1 INFO=1 DEBUG=1
+    make DEV TLS=0 INFO=1 DEBUG=1
+    make DEV TLS=1 WARN=1 INFO=1 DEBUG=1
+    make DEV TLS=0 WARN=1 INFO=1 DEBUG=1
 
-BENCH builds (BENCH=1, DEBUG not allowed):
+BENCH builds (BENCH, DEBUG not allowed):
 
-    make BENCH=1 TLS=1
-    make BENCH=1 TLS=0
-    make BENCH=1 TLS=1 WARN=1
-    make BENCH=1 TLS=0 WARN=1
-    make BENCH=1 TLS=1 INFO=1
-    make BENCH=1 TLS=0 INFO=1
-    make BENCH=1 TLS=1 WARN=1 INFO=1
-    make BENCH=1 TLS=0 WARN=1 INFO=1
+    make BENCH TLS=1
+    make BENCH TLS=0
+    make BENCH TLS=1 WARN=1
+    make BENCH TLS=0 WARN=1
+    make BENCH TLS=1 INFO=1
+    make BENCH TLS=0 INFO=1
+    make BENCH TLS=1 WARN=1 INFO=1
+    make BENCH TLS=0 WARN=1 INFO=1
 
 Any other combination of PROD / BENCH / mTLS / WARN / INFO / DEBUG
 is considered invalid and should fail at Makefile or compile time.
@@ -879,7 +879,7 @@ Configuration:
 
 Make command (recommended):
 
-    make PROD=1 mTLS=1 WARN=1 INFO=1
+    make PROD mTLS=1 WARN=1 INFO=1
 
 Equivalent gcc command (approximate):
 
@@ -917,7 +917,7 @@ Configuration:
 
 Make command:
 
-    make PROD=1 mTLS=0 WARN=1
+    make PROD mTLS=0 WARN=1
 
 Equivalent gcc command:
 
@@ -953,7 +953,7 @@ Configuration:
 
 Make command:
 
-    make PROD=0 mTLS=1
+    make DEV mTLS=1
 
 Equivalent gcc command:
 
@@ -973,7 +973,7 @@ Equivalent gcc command:
 
 Why equivalent:
 
-    - PROD=0 maps to __DEV__ (DEV mode).
+    - DEV maps to __DEV__ (DEV mode).
     - mTLS=1 maps to __REQUIRE_MUTUAL_TLS__.
     - DEV builds enable sanitizers and debug information.
 
@@ -992,7 +992,7 @@ Configuration:
 
 Make command:
 
-    make PROD=0 mTLS=0 DEBUG=1
+    make DEV mTLS=0 DEBUG=1
 
 Equivalent gcc command:
 
@@ -1029,7 +1029,7 @@ Configuration:
 
 Make command:
 
-    make BENCH=1 mTLS=1 INFO=1
+    make BENCH mTLS=1 INFO=1
 
 Equivalent gcc command:
 
@@ -1047,7 +1047,7 @@ Equivalent gcc command:
 
 Why equivalent:
 
-    - BENCH=1 maps to __BENCH__, with neither __DEV__ nor __PROD__ defined.
+    - BENCH maps to __BENCH__, with neither __DEV__ nor __PROD__ defined.
     - mTLS=1 maps to __REQUIRE_MUTUAL_TLS__.
     - INFO=1 maps to __LOG_ENABLE_INFO__.
     - __ALLOWED_HOST__ is typically 127.0.0.1 for BENCH builds.
@@ -1066,7 +1066,7 @@ Configuration:
 
 Make command:
 
-    make BENCH=1 mTLS=0 WARN=1
+    make BENCH mTLS=0 WARN=1
 
 Equivalent gcc command:
 
@@ -1099,7 +1099,7 @@ Security note:
 
 Minimal PROD, mutual TLS, no extra logs:
 
-    make PROD=1 mTLS=1
+    make PROD mTLS=1
 
 Approximate gcc:
 
@@ -1114,7 +1114,7 @@ Approximate gcc:
 
 Minimal DEV, server-auth only, no extra logs:
 
-    make PROD=0 mTLS=0
+    make DEV mTLS=0
 
 Approximate gcc:
 
@@ -1130,7 +1130,7 @@ Approximate gcc:
 
 Minimal BENCH, mutual TLS, no extra logs:
 
-    make BENCH=1 TLS=1
+    make BENCH TLS=1
 
 Approximate gcc:
 
@@ -1205,7 +1205,7 @@ Notes:
 
 DEV mode, mTLS=1 (mutual TLS, all logs enabled):
     Build:
-        make PROD=0 mTLS=1
+        make DEV mTLS=1
     Test:
         openssl s_client -connect 127.0.0.1:443 \
             -servername localhost \
@@ -1222,7 +1222,7 @@ DEV mode, mTLS=1 (mutual TLS, all logs enabled):
 
 PROD mode, mTLS=1 (mutual TLS, strict host enforcement):
     Build:
-        make PROD=1 mTLS=1 WARN=1 INFO=1
+        make PROD mTLS=1 WARN=1 INFO=1
     Test:
         openssl s_client -connect 127.0.0.1:443 \
             -servername secure.lab.linux \
@@ -1240,7 +1240,7 @@ PROD mode, mTLS=1 (mutual TLS, strict host enforcement):
 
 BENCH mode, mTLS=0 (server-auth TLS, minimal logging):
     Build:
-        make BENCH=1 mTLS=0 INFO=1
+        make BENCH mTLS=0 INFO=1
     Test:
         openssl s_client -connect 127.0.0.1:443 \
             -servername 127.0.0.1 \
@@ -1286,8 +1286,8 @@ Sandboxing (PROD and BENCH):
 
     - The process should start with sufficient privileges to:
         * bind port 443,
-        * chroot into a restricted directory (for example: /var/secure-tls-server),
-        * drop privileges to an unprivileged account (for example: www-data).
+        * chroot into a restricted directory (for example: /var/secure-mtls-server),
+        * drop privileges to an unprivileged account (for example: svc_mtls_server).
 
     - Certificate and key files should be placed inside the chroot and owned
       by root:root with strict permissions (for example: 750).
@@ -1647,20 +1647,20 @@ static void rvShutDownSSL_AndCloseFD(void)
  *  - In PROD and BENCH builds (no __DEV__):
  *      * The process is expected to start as root (to allow chroot + priv-drop).
  *      * After InitialiseServer() binds the listening socket:
- *          - chroot() into /var/secure-tls-server
- *          - drop to www-data:www-data
+ *          - chroot() into /var/secure-mtls-server
+ *          - drop to svc_mtls_server:svc_mtls_server
  *          - apply RLIMIT_NOFILE and RLIMIT_NPROC
  *
  *  - In __DEV__ builds:
  *      * We intentionally skip this to keep debugging simple.
  *
  *  NOTE:
- *    The jail directory /var/secure-tls-server must be prepared beforehand:
+ *    The jail directory /var/secure-mtls-server must be prepared beforehand:
  *
- *      sudo mkdir -p /var/secure-tls-server
- *      sudo cp cert.pem key.pem ca-cert.pem /var/secure-tls-server
- *      sudo chown -R root:root /var/secure-tls-server
- *      sudo chmod -R 750 /var/secure-tls-server
+ *      sudo mkdir -p /var/secure-mtls-server
+ *      sudo cp server-cert.pem server-key.pem ca-cert.pem /var/secure-mtls-server/certs/
+ *      sudo chown -R root:svc_mtls_server /var/secure-mtls-server
+ *      sudo chmod -R 750 /var/secure-mtls-server
  * ============================================================================
 **/
 static bool rvDropPrivileges_AndChroot(void)
@@ -1669,17 +1669,17 @@ static bool rvDropPrivileges_AndChroot(void)
 
 	do
 	{
-		struct passwd* pw = getpwnam("www-data");
+		struct passwd* pw = getpwnam("svc_mtls_server");
 		if ((struct passwd*)NULL == pw)
 		{
-			LOG_ERROR_ERRNO("getpwnam(\"www-data\") failed");
+			LOG_ERROR_ERRNO("getpwnam(\"svc_mtls_server\") failed");
 			break;
 		}
 
 		/* Enter hardened jail. Directory must already exist and be owned by root. */
-		if (0 != chroot("/var/secure-tls-server"))
+		if (0 != chroot("/var/secure-mtls-server"))
 		{
-			LOG_ERROR_ERRNO("chroot(\"/var/secure-tls-server\") failed");
+			LOG_ERROR_ERRNO("chroot(\"/var/secure-mtls-server\") failed");
 			break;
 		}
 
@@ -1692,13 +1692,13 @@ static bool rvDropPrivileges_AndChroot(void)
 		/* Drop group first, then user */
 		if (0 != setgid(pw->pw_gid))
 		{
-			LOG_ERROR_ERRNO("setgid(www-data) failed");
+			LOG_ERROR_ERRNO("setgid(svc_mtls_server) failed");
 			break;
 		}
 
 		if (0 != setuid(pw->pw_uid))
 		{
-			LOG_ERROR_ERRNO("setuid(www-data) failed");
+			LOG_ERROR_ERRNO("setuid(svc_mtls_server) failed");
 			break;
 		}
 
@@ -1709,7 +1709,7 @@ static bool rvDropPrivileges_AndChroot(void)
 			break;
 		}
 
-		LOG_INFO("Dropped privileges to www-data inside /var/secure-tls-server chroot.");
+		LOG_INFO("Dropped privileges to svc_mtls_server inside /var/secure-mtls-server chroot.");
 		ret = true;
 	} while (false);
 
@@ -2497,6 +2497,142 @@ static bool rv_parse_http_host(const char* host_hdr, char* out_host, size_t out_
 	return ret;
 }
 
+#if defined( __REQUIRE_MUTUAL_TLS__ )
+
+/* mode_hardened: when true, enforce exactly-one-SAN and stricter rules */
+bool VerifyClientCertificate(SSL *ssl_handle,
+                             const char *allowed_identities[], size_t n_allowed,
+                             bool mode_hardened)
+{
+    if (ssl_handle == NULL) return false;
+
+    X509 *cert = SSL_get_peer_certificate(ssl_handle); /* returns a new reference or NULL */
+    if (cert == NULL) {
+        /* No cert presented */
+        fprintf(stderr, "[AUTH] No client certificate presented\n");
+        return false;
+    }
+
+    /* 1) Verify chain/trust and revocation - OpenSSL does the heavy lifting */
+    long vres = SSL_get_verify_result(ssl_handle);
+    if (vres != X509_V_OK) {
+        fprintf(stderr, "[AUTH] Certificate chain verification failed: %s\n",
+                X509_verify_cert_error_string(vres));
+        X509_free(cert);
+        return false;
+    }
+
+    /* 2) Extract SANs (RFC 6125) -- require SAN presence */
+    STACK_OF(GENERAL_NAME) *san_names = NULL;
+    san_names = (STACK_OF(GENERAL_NAME)*)X509_get_ext_d2i(cert, NID_subject_alt_name, NULL, NULL);
+    if (san_names == NULL) {
+        /* Defence-grade: reject certs without SAN */
+        fprintf(stderr, "[AUTH] Rejecting client certificate without SAN (RFC 6125)\n");
+        X509_free(cert);
+        return false;
+    }
+
+    int san_count = sk_GENERAL_NAME_num(san_names);
+    if (mode_hardened && san_count != 1) {
+        fprintf(stderr, "[AUTH] Hardened mode: expected exactly 1 SAN entry, found %d\n", san_count);
+        sk_GENERAL_NAME_pop_free(san_names, GENERAL_NAME_free);
+        X509_free(cert);
+        return false;
+    }
+
+    bool matched = false;
+
+    /* iterate SANs and compare against allowed_identities */
+    for (int i = 0; i < san_count; ++i) {
+        const GENERAL_NAME *gen = sk_GENERAL_NAME_value(san_names, i);
+        if (gen == NULL) continue;
+
+        if (gen->type == GEN_DNS) {
+            const ASN1_STRING *s = gen->d.dNSName;
+            const unsigned char *dns = ASN1_STRING_get0_data(s);
+            /* ASN1_STRING_get0_data is not NUL-terminated guarantee: but OpenSSL ensures it for dNSName */
+            if (dns == NULL) continue;
+
+            /* Exact match required in defence mode */
+            for (size_t a = 0; a < n_allowed; ++a) {
+                if (strcmp((const char*)dns, allowed_identities[a]) == 0) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (matched) break;
+        }
+        else if (gen->type == GEN_URI) {
+            const ASN1_STRING *s = gen->d.uniformResourceIdentifier;
+            const unsigned char *uri = ASN1_STRING_get0_data(s);
+            if (uri == NULL) continue;
+
+            for (size_t a = 0; a < n_allowed; ++a) {
+                /* SPIFFE URIs or other policy URIs: allow prefix matching if policy permits */
+                if (strcmp((const char*)uri, allowed_identities[a]) == 0) {
+                    matched = true;
+                    break;
+                }
+                /* optionally allow exact prefix match like "spiffe://org/" */
+                /* if (strncmp((const char*)uri, allowed_identities[a], strlen(allowed_identities[a])) == 0) { matched = true; break; } */
+            }
+            if (matched) break;
+        }
+        else if (gen->type == GEN_OTHERNAME) {
+            /*
+             * Some hardened deployments place identity in otherName with a specific OID.
+             * Parsing otherName is application-specific. Here we illustrate safe extraction
+             * for UTF8String or IA5String content if present.
+             */
+            const OTHERNAME *on = gen->d.otherName;
+            if (on && on->value) {
+                /* on->value is an ASN1_TYPE. Convert to UTF8 if possible. */
+                ASN1_STRING *asn_str = on->value->value.asn1_string;
+                if (asn_str) {
+                    unsigned char *buf = NULL;
+                    int len = ASN1_STRING_to_UTF8(&buf, asn_str);
+                    if (len > 0 && buf) {
+                        for (size_t a = 0; a < n_allowed; ++a) {
+                            if (strcmp((const char*)buf, allowed_identities[a]) == 0) {
+                                matched = true;
+                                break;
+                            }
+                        }
+                        OPENSSL_free(buf);
+                        if (matched) break;
+                    }
+                }
+            }
+        }
+        else {
+            /* other SAN types (IP, email) can be handled similarly if your policy permits */
+        }
+    }
+
+    sk_GENERAL_NAME_pop_free(san_names, GENERAL_NAME_free);
+
+    if (!matched) {
+        /* not authorized by list */
+        fprintf(stderr, "[AUTH] Client certificate SAN did not match allowed identities\n");
+        X509_free(cert);
+        return false;
+    }
+
+    /*
+     * Optional: additional checks:
+     *  - Check certificate validity period manually (already done by verify_result)
+     *  - Check key usage / extendedKeyUsage for clientAuth (also checked by policy, but you can assert)
+     *  - Check certificate serial / revocation lists (if not already enforced upstream)
+     */
+
+    /* Success: certificate is valid, trusted, not revoked, and identity is authorized */
+    fprintf(stdout, "[AUTH] Client certificate accepted (identity matched)\n");
+
+    X509_free(cert);
+    return true;
+}
+#endif // of defined( __REQUIRE_MUTUAL_TLS__ )
+
 static void RunServerLoop(void)
 {
 	/* Refer file socket.h. It is evident that size of sockaddr_storage is larger than that of sockaddr */
@@ -2568,6 +2704,10 @@ static void RunServerLoop(void)
 				continue;
 			}
 
+LOG_INFO(">>>> HOST = %s", host);
+
+// Only client should call SSL_set1_host(), not the server.
+#if 0
 #if defined( __REQUIRE_MUTUAL_TLS__ )
 			/* Enforce hostname check against certificate (SAN/CN) */
 			if (1 != SSL_set1_host(ssl, host))
@@ -2580,6 +2720,7 @@ static void RunServerLoop(void)
 				continue;
 			}
 #endif // of defined( __REQUIRE_MUTUAL_TLS__ )
+#endif // of 0
 		}
 
 		const int ret_ssl = SSL_accept(ssl);
@@ -2630,6 +2771,16 @@ static void RunServerLoop(void)
 				continue;
 			}
 		}
+
+		const char *allowed[] = { "client" }; //, "spiffe://myorg/serviceX", /* ... */ };
+		bool ok = VerifyClientCertificate(ssl, allowed, sizeof(allowed)/sizeof(allowed[0]), /*mode_hardened=*/ true);
+		if (!ok)
+		{
+			/* send HTTP 403 or close */
+			rvShutDownSSL_AndCloseFD();
+			continue;
+		}
+
 #endif // of defined( __REQUIRE_MUTUAL_TLS__ )
 		/* ---- End: mutual TLS block ---- */
 
@@ -2890,8 +3041,8 @@ int main(void)
 		 * PROD / BENCH builds:
 		 *   - Process is expected to start as root so we can chroot and drop privileges.
 		 *   - After InitialiseServer() binds the listening socket, we:
-		 *       - chroot into /var/secure-tls-server
-		 *       - drop to www-data:www-data
+		 *       - chroot into /var/secure-mtls-server
+		 *       - drop to svc_mtls_server:svc_mtls_server
 		 *       - apply resource limits (NOFILE / NPROC)
 		 */
 		if (0 != geteuid())

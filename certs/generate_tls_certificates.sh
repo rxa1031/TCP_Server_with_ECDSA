@@ -2,12 +2,10 @@
 set -euo pipefail
 
 ###############################################################################
-# generate_tls_certificates.sh
-# - Generates ECDSA (prime256v1) CA, server and client certificates suitable
-#   for use with ECDHE-ECDSA cipher suites and strict mTLS.
-# - Respects MODE (DEV | PROD | BENCH) and uses HOST/PORT from Makefile logic.
-# - Writes files into ./certs/ (script must be executed from repo root or will
-#   create certs/ under current dir).
+# Defence-grade TLS Certificate Generator (ECDSA P-256)
+# - Generates CA, server, and client certificates.
+# - SAN is ALWAYS included (required by RFC 6125 / OpenSSL hostname checks).
+# - DEV may include extra SAN entries; PROD/BENCH are strict.
 ###############################################################################
 
 CERT_DIR="certs"
@@ -48,7 +46,7 @@ echo "Host: $HOST"
 echo "Port: $PORT"
 echo
 
-# Cleanup old files (idempotent)
+# Cleanup old artifacts
 rm -f server-key.pem server-cert.pem server.csr \
       ca-key.pem ca-cert.pem ca-crl.pem ca-cert.srl \
       client-key.pem client-cert.pem client.csr \
@@ -60,7 +58,7 @@ if [[ -z "$OPENSSL" ]]; then
     exit 2
 fi
 
-# Temporary files cleanup on exit
+# Temporary files cleanup
 TMP_TO_CLEAN=()
 cleanup() {
   for f in "${TMP_TO_CLEAN[@]}"; do
@@ -70,7 +68,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ============================================================
-# CA (ECDSA, prime256v1) — create CA key and CA certificate with CA extensions
+# CA
 # ============================================================
 echo "[1] Creating CA key"
 $OPENSSL ecparam -name prime256v1 -genkey -out ca-key.pem >/dev/null
@@ -99,16 +97,16 @@ $OPENSSL req -x509 -new -key ca-key.pem -sha256 \
     -days "$DAYS" -config "$CA_CFG" -out ca-cert.pem
 
 # ============================================================
-# Server certificate (ECDSA)
+# Server certificate
 # ============================================================
 echo "[3] Creating server key"
 $OPENSSL ecparam -name prime256v1 -genkey -out server-key.pem >/dev/null
 chmod 600 server-key.pem
 
-TMP_CFG=$(mktemp)
-TMP_TO_CLEAN+=("$TMP_CFG")
+SERVER_CFG=$(mktemp)
+TMP_TO_CLEAN+=("$SERVER_CFG")
 
-cat > "$TMP_CFG" <<EOF
+cat > "$SERVER_CFG" <<EOF
 [ req ]
 prompt = no
 distinguished_name = dn
@@ -127,23 +125,21 @@ subjectAltName = @san
 DNS.1 = ${HOST}
 EOF
 
-# include IP SAN for DEV only (keeps PROD/BENCH strictly matching Makefile host)
-if [[ "$MODE" = "DEV" ]]; then
-  printf "IP.1 = 127.0.0.1\n" >> "$TMP_CFG"
-fi
-
 echo "[4] Creating server CSR"
-$OPENSSL req -new -key server-key.pem -out server.csr -config "$TMP_CFG"
+$OPENSSL req -new -key server-key.pem -out server.csr -config "$SERVER_CFG"
 
 echo "Signing server certificate"
 $OPENSSL x509 -req -in server.csr -CA ca-cert.pem -CAkey ca-key.pem \
     -CAcreateserial -out server-cert.pem -days "$DAYS" -sha256 \
-    -extfile "$TMP_CFG" -extensions ext
+    -extfile "$SERVER_CFG" -extensions ext
 
 rm -f server.csr
 
 # ============================================================
-# CLIENT CERTIFICATE (required for mTLS)
+# CLIENT CERTIFICATE (mTLS identity)
+# Defence-grade rule:
+#   Client identity must NOT depend on host or IP.
+#   Identity is a stable label → CN=client, SAN=DNS:client
 # ============================================================
 echo "[5] Creating client key"
 $OPENSSL ecparam -name prime256v1 -genkey -out client-key.pem >/dev/null
@@ -159,7 +155,7 @@ distinguished_name = dn
 req_extensions = ext
 
 [ dn ]
-CN = client.${HOST}
+CN = client
 
 [ ext ]
 basicConstraints = CA:FALSE
@@ -168,13 +164,8 @@ extendedKeyUsage = clientAuth
 subjectAltName = @san
 
 [ san ]
-DNS.1 = client.${HOST}
+DNS.1 = client
 EOF
-
-# include IP SAN for DEV only
-if [[ "$MODE" = "DEV" ]]; then
-  printf "IP.1 = 127.0.0.1\n" >> "$CLIENT_CFG"
-fi
 
 echo "[6] Creating client CSR"
 $OPENSSL req -new -key client-key.pem -out client.csr -config "$CLIENT_CFG"
@@ -217,28 +208,25 @@ EOF
 )
 
 # ============================================================
-# Basic validations
+# Validation
 # ============================================================
-# Ensure files exist and certificate CN matches expected value for server
-if [[ ! -f server-cert.pem || ! -f server-key.pem || ! -f ca-cert.pem || ! -f client-cert.pem || ! -f client-key.pem || ! -f ca-crl.pem ]]; then
-  echo "ERROR: One or more expected PEM files missing"
-  ls -1
+if [[ ! -f server-cert.pem || ! -f server-key.pem || ! -f client-cert.pem || ! -f client-key.pem || ! -f ca-cert.pem || ! -f ca-crl.pem ]]; then
+  echo "ERROR: Missing certificate artifacts"
   exit 3
 fi
 
 server_cn=$($OPENSSL x509 -in server-cert.pem -noout -subject | sed -E 's/.*CN *= *([^,\/]+).*/\1/')
 if [[ "$server_cn" != "${HOST}:${PORT}" ]]; then
-  echo "ERROR: server CN mismatch: found='$server_cn' expected='${HOST}:${PORT}'"
+  echo "ERROR: server CN mismatch: $server_cn != ${HOST}:${PORT}"
   exit 4
 fi
 
-# Quick cert inspection (non-fatal) — prints issuer for human confirmation
 echo
 echo "Certificates generated:"
 echo "  server-key.pem"
 echo "  server-cert.pem (CN=$server_cn)"
 echo "  client-key.pem"
-echo "  client-cert.pem"
+echo "  client-cert.pem (CN=client)"
 echo "  ca-cert.pem"
 echo "  ca-crl.pem"
 echo "Done."

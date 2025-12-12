@@ -1,0 +1,376 @@
+
+/* ============================================================================
+ *                    CERTIFICATE CHAIN — VISUAL TRUST FLOW
+ * ============================================================================
+ *
+ *                             (Root of Trust)
+ *                            ┌────────────────┐
+ *                            │   ca-key.pem   │  ← CA PRIVATE KEY
+ *                            │(never shipped) │
+ *                            └───────▲────────┘
+ *                                    │ signs
+ *                                    │
+ *                            ┌────────────────┐
+ *                            │  ca-cert.pem   │  ← CA CERTIFICATE (public)
+ *                            └───────┬────────┘
+ *                                    │
+ *     ┌──────────────────────────────┼──────────────────────────────┐
+ *     │                              │                              │
+ *     │                              │                              │
+ *     ▼                              ▼                              ▼
+ *
+ *  SERVER CERT PATH           CLIENT CERT PATH                 CRL PATH
+ *  ------------------         ------------------               -------------
+ *
+ *   1. Generate key            1. Generate key                 1. CA generates CRL
+ *      ┌────────────────┐         ┌────────────────┐              ┌────────────────┐
+ *      │ server-key.pem │         │ client-key.pem │              │  ca-crl.pem    │
+ *      │(private key)   │         │(private key)   │              │ (revocations)  │
+ *      └───────┬────────┘         └───────┬────────┘              └────────────────┘
+ *              │                          │
+ *   2. CSR     │               2. CSR     │
+ *   ┌──────────▼──────────┐    ┌──────────▼──────────┐
+ *   │    server.csr       │    │     client.csr      │
+ *   └─────────┬───────────┘    └──────────┬──────────┘
+ *             │ signs using CA            │ signs using CA
+ *             ▼                           ▼
+ *
+ *     ┌──────────────────┐        ┌──────────────────┐
+ *     │ server-cert.pem  │        │ client-cert.pem  │
+ *     │  (server identity│        │  (client identity│
+ *     │   signed by CA)  │        │   signed by CA)  │
+ *     └──────────────────┘        └──────────────────┘
+ *
+ *
+ * ============================================================================
+ *                           RUNTIME REQUIREMENTS
+ * ============================================================================
+ *
+ * SERVER must have:
+ *      ✔ server-key.pem       (private key)
+ *      ✔ server-cert.pem      (server certificate)
+ *      ✔ ca-cert.pem          (to verify client certs during mTLS)
+ *      ✔ ca-crl.pem           (required only when SECURITY_LEVEL ≥ 2)
+ *
+ * CLIENT must have (mTLS only):
+ *      ✔ client-key.pem       (private key)
+ *      ✔ client-cert.pem      (client certificate)
+ *      ✔ ca-cert.pem          (to verify server certificate)
+ *
+ * NEVER COPY:
+ *      ✘ ca-key.pem    (CA private key — extremely sensitive)
+ *
+ * ============================================================================
+ */
+
+=============================================================
+==>> IMPORTANT
+✔ YES.
+=============================================================
+ASSUMING: commands are being executed from within WSL (Windows Subsystem for Linux)
+and not from within an actual terminal on Ubuntu. Hence commands using
+WILD CARDS (like '*') ahould be wrapped:
+sudo sh -c '...'
+(where ... informs the place where the command is to be copied without the sudo command keyword.)
+
+=============================================================
+==>> Do you need to run the useradd command at least once?
+✔ YES.
+=============================================================
+
+You must create the hardened service account exactly **once** on your machine.
+
+This creates:
+
+username → svc_mtls_server
+
+group → svc_mtls_server
+
+no login shell
+
+no home directory
+
+marked as a system account (defence-grade practice)
+
+Run these commands ONE TIME:
+
+# Either Step 1.a: Executed when owner name and group name are same (i.e., svc_mtls_server)
+sudo useradd \
+  --system \
+  --shell /usr/sbin/nologin \
+  --comment "Secure mTLS Server Service Account" \
+  --no-create-home \
+  --user-group \
+  svc_mtls_server
+
+# Or Step 1.b: when pner and group name are different:
+sudo groupadd --system dvc_mtls_server
+sudo useradd \
+    --system \
+    --gid dvc_mtls_server \
+    --home /var/secure-mtls-server \
+    --shell /usr/sbin/nologin \
+    --comment "Secure mTLS Server User" \
+    mtls_user
+
+
+=============================================================
+Whenever we execute useradd we should also execute:
+=============================================================
+sudo mkdir -p /var/secure-mtls-server/certs
+# NOT: use correct value as per user and group. Here it is assumed
+#      that user and group name are same.
+sudo chown root:svc_mtls_server /var/secure-mtls-server/certs
+sudo chmod 750 /var/secure-mtls-server/certs
+
+
+=============================================================
+Before building the binary locally, execute:
+=============================================================
+rm -f build/mtls_server
+
+
+=============================================================
+Build binary using correct gcc command which is shared in later
+part of document
+=============================================================
+execute desired command similar to: gcc ... -o build/mtls_server
+
+
+=============================================================
+After building the binary locally, follow below steps:
+=============================================================
+
+Step 1: Then move it into your hardened chroot jail:
+sudo cp ./build/mtls_server /var/secure-mtls-server/mtls_server
+
+Step 2: Set hardened permissions:
+sudo chown root:svc_mtls_server /var/secure-mtls-server/mtls_server
+
+Step 3: Set correct ownership (where format is owner:group):
+sudo chmod 750 /var/secure-mtls-server/mtls_server
+
+=============================================================
+Generate certificate files using generate_tls_certificates.sh
+=============================================================
+# First execute remove command manually, just to be dure the old certificates are deleted:
+sudo sh -c 'rm -f ./certs/*.pem'
+
+# then check using:
+sudo sh -c 'ls -l ./certs/*.pem'
+
+# Usage: ./certs/generate_tls_certificates.sh DEV | PROD | BENCH
+# Example shows how to generate certificates for BENCH mode:
+./certs/generate_tls_certificates.sh BENCH
+
+=============================================================
+What must you do with the cert folder?
+=============================================================
+
+NOTE: To delete files using '*.pem' within WSL when the file resides in /var/... use below command:
+# pad the command(s) to execute for example:
+# rm -f /var/secure-mtls-server/certs/*.pem
+# within:
+# sudo sh -c '
+# commad to execute
+# '
+# like:
+sudo sh -c 'rm -f /var/secure-mtls-server/certs/*.pem'
+
+Step 1: Ensure commands listed under "Whenever we execute useradd we should also execute" above
+        were executed at least once.
+
+Step 2: Copy your new certs:
+sudo sh -c '
+cp ./certs/ca-cert.pem /var/secure-mtls-server/certs/
+cp ./certs/server-cert.pem /var/secure-mtls-server/certs/
+cp ./certs/server-key.pem /var/secure-mtls-server/certs/
+cp ./certs/ca-crl.pem /var/secure-mtls-server/certs/
+'
+
+Step 3: Then fix ownership:
+sudo sh -c 'sudo chown root:svc_mtls_server /var/secure-mtls-server/certs/*.pem'
+
+Step 4: Fix permissions:
+sudo sh -c 'sudo chmod 640 /var/secure-mtls-server/certs/*.pem'
+
+=============================================================
+Execute server from /var/secure-mtls-server/
+=============================================================
+sudo /var/secure-mtls-server/mtls_server
+
+
+=============================================================
+GCC BUILD COMMANDS FOR DEV, PROD, BENCH
+=============================================================
+
+These commands assume:
+
+Source file: src/mtls_server.c
+
+Output directory: build/
+
+Certificates under: certs/
+
+⭐ DEV BUILD:
+
+gcc -std=c23 \
+    -Wall -Wextra -Werror -Wpedantic \
+    -Wformat=2 -Wshadow -Wpointer-arith \
+    -Wcast-align -Wwrite-strings -Wconversion -Wstrict-prototypes \
+    -D_FORTIFY_SOURCE=2 \
+    -g3 -O0 \
+    -fsanitize=address,undefined,leak -fno-omit-frame-pointer \
+    -D__DEV__ \
+    -D__ALLOWED_HOST__=\"localhost\" \
+    -D__TLS_PORT__=8443 -D__TLS_PORT_STR__=\"8443\" \
+    -D__SECURITY_LEVEL__=2 \
+    -U__REQUIRE_MUTUAL_TLS__ \
+    -D__LOG_ENABLE_ERROR__ -D__LOG_ENABLE_WARN__ \
+    -D__LOG_ENABLE_INFO__ -D__LOG_ENABLE_DEBUG__ \
+    -D__CERT_FOLDER__=\"certs\" \
+    -D__SERVER_CERT_NAME__=\"server-cert.pem\" \
+    -D__SERVER_KEY_NAME__=\"server-key.pem\" \
+    -D__CA_CERT_NAME__=\"ca-cert.pem\" \
+    -D__CA_CRL_NAME__=\"ca-crl.pem\" \
+    -D__SERVER_CERT_PATH__=\"certs/server-cert.pem\" \
+    -D__SERVER_KEY_PATH__=\"certs/server-key.pem\" \
+    -D__CA_CERT_PATH__=\"certs/ca-cert.pem\" \
+    -D__CA_CRL_PATH__=\"certs/ca-crl.pem\" \
+    src/mtls_server.c \
+    -o build/mtls_server \
+    -lssl -lcrypto
+
+⭐ PROD BUILD:
+
+gcc -std=c23 \
+    -Wall -Wextra -Werror -Wpedantic \
+    -Wformat=2 -Wshadow -Wpointer-arith \
+    -Wcast-align -Wwrite-strings -Wconversion -Wstrict-prototypes \
+    -D_FORTIFY_SOURCE=2 \
+    -O2 -pipe -fstack-clash-protection -DNDEBUG \
+    -D__PROD__ \
+    -D__REQUIRE_MUTUAL_TLS__ \
+    -D__ALLOWED_HOST__=\"secure.lab.linux\" \
+    -D__TLS_PORT__=443 -D__TLS_PORT_STR__=\"443\" \
+    -D__SECURITY_LEVEL__=2 \
+    -D__LOG_ENABLE_ERROR__ -D__LOG_ENABLE_WARN__ \
+    -D__LOG_ENABLE_INFO__ -D__LOG_ENABLE_DEBUG__ \
+    -D__CERT_FOLDER__=\"certs\" \
+    -D__SERVER_CERT_NAME__=\"server-cert.pem\" \
+    -D__SERVER_KEY_NAME__=\"server-key.pem\" \
+    -D__CA_CERT_NAME__=\"ca-cert.pem\" \
+    -D__CA_CRL_NAME__=\"ca-crl.pem\" \
+    -D__SERVER_CERT_PATH__=\"certs/server-cert.pem\" \
+    -D__SERVER_KEY_PATH__=\"certs/server-key.pem\" \
+    -D__CA_CERT_PATH__=\"certs/ca-cert.pem\" \
+    -D__CA_CRL_PATH__=\"certs/ca-crl.pem\" \
+    src/mtls_server.c \
+    -o build/mtls_server \
+    -lssl -lcrypto \
+    -pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,-z,defs
+
+⭐ BENCH BUILD:
+
+gcc -std=c23 \
+    -Wall -Wextra -Werror -Wpedantic \
+    -Wformat=2 -Wshadow -Wpointer-arith \
+    -Wcast-align -Wwrite-strings -Wconversion -Wstrict-prototypes \
+    -D_FORTIFY_SOURCE=2 \
+    -O2 -pipe -fstack-clash-protection -DNDEBUG \
+    -D__BENCH__ \
+    -D__REQUIRE_MUTUAL_TLS__ \
+    -D__ALLOWED_HOST__=\"127.0.0.1\" \
+    -D__TLS_PORT__=443 -D__TLS_PORT_STR__=\"443\" \
+    -D__SECURITY_LEVEL__=2 \
+    -D__LOG_ENABLE_ERROR__ -D__LOG_ENABLE_WARN__ \
+    -D__LOG_ENABLE_INFO__ -D__LOG_ENABLE_DEBUG__ \
+    -D__CERT_FOLDER__=\"certs\" \
+    -D__SERVER_CERT_NAME__=\"server-cert.pem\" \
+    -D__SERVER_KEY_NAME__=\"server-key.pem\" \
+    -D__CA_CERT_NAME__=\"ca-cert.pem\" \
+    -D__CA_CRL_NAME__=\"ca-crl.pem\" \
+    -D__SERVER_CERT_PATH__=\"certs/server-cert.pem\" \
+    -D__SERVER_KEY_PATH__=\"certs/server-key.pem\" \
+    -D__CA_CERT_PATH__=\"certs/ca-cert.pem\" \
+    -D__CA_CRL_PATH__=\"certs/ca-crl.pem\" \
+    src/mtls_server.c \
+    -o build/mtls_server \
+    -lssl -lcrypto \
+    -pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
+
+
+
+OPENSSL CLIENT COMMANDS FOR EACH MODE
+⭐ DEV MODE TLS Client (localhost:8443)
+
+mTLS: OFF by default in SL=1
+But if you want mTLS, pass certs.
+
+Without client cert (if your DEV allows server-auth-only):
+openssl s_client -connect localhost:8443 \
+  -servername localhost \
+  -CAfile ./certs/ca-cert.pem
+
+With client cert (mTLS enabled):
+printf "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" | \
+openssl s_client -connect localhost:8443 \
+  -servername localhost \
+  -CAfile ./certs/ca-cert.pem \
+  -cert ./certs/client-cert.pem \
+  -key ./certs/client-key.pem
+  -crlf
+
+⭐ PROD MODE TLS Client (secure.lab.linux:443)
+
+mTLS always ON
+
+printf "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" | \
+openssl s_client -connect secure.lab.linux:443 \
+  -servername secure.lab.linux \
+  -CAfile ./certs/ca-cert.pem \
+  -cert ./certs/client-cert.pem \
+  -key ./certs/client-key.pem
+  -crlf
+
+⭐ BENCH MODE TLS Client (127.0.0.1:443)
+
+mTLS always ON
+
+printf "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" | \
+openssl s_client \
+  -connect 127.0.0.1:443 \
+  -servername 127.0.0.1 \
+  -cert certs/client-cert.pem \
+  -key certs/client-key.pem \
+  -CAfile certs/ca-cert.pem \
+  -crlf
+
+==>> Check certificate content example:
+openssl x509 -in ./certs/client-cert.pem -text -noout
+
+
+==>> Restart the server so the current binary is used
+# stop every running instance we see (safe: your server is single-purpose here)
+sudo pkill -f build/mtls_server || true
+# confirm no leftover processes
+ps -ef | grep mtls_server | grep -v grep || true
+# start the server in foreground so you can see its logs
+sudo ./build/mtls_server
+
+
+On a separate shell, run a verbose TLS client trace (this must be executed while server is running)
+
+Run this exact command to capture the full handshake trace and debug info:
+
+openssl s_client -connect 127.0.0.1:443 \
+  -CAfile ./certs/ca-cert.pem \
+  -cert ./certs/client-cert.pem \
+  -key ./certs/client-key.pem \
+  -msg -debug -trace -tls1_3
+
+
+==>> Verify the client private key matches the client certificate (EC keys)
+# Run both commands and paste their two SHA256 strings — they must be identical:
+openssl pkey -in ./certs/client-key.pem -pubout -outform pem | sha256sum
+openssl x509 -in ./certs/client-cert.pem -pubkey -noout -outform pem | sha256sum
