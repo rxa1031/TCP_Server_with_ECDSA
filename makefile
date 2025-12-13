@@ -1,8 +1,9 @@
 # -----------------------------------------------------------------------------
-# mtls_server Makefile (final, audited, dense comments)
+# mtls_server Makefile
+# Policy-aligned build rules for DEV / PROD / BENCH
 #
-# - Dense documentation included.
-# - Mode selection: only one mode at a time (PROD / DEV / BENCH).
+# - Comprehensive inline documentation included.
+# - Mode selection: exactly one build mode is active at a time (PROD / DEV / BENCH).
 #   * PROD is default: `make` or `make PROD=1`.
 #   * DEV is `make PROD=0`.
 #   * BENCH is `make BENCH=1` (must be exactly 1; BENCH=0 or BENCH= empty -> error).
@@ -52,18 +53,17 @@ DEBUG ?= 0
 # =============================================================================
 # Sanitizer controls (0/1)
 # =============================================================================
-SAN  ?= 1
-EXIT ?= 0
+SAN   ?= 1
+EXIT  ?= 0
 
 # =============================================================================
 # Certificate filenames (override friendly)
 # =============================================================================
 CERT_FOLDER ?= certs
-
-SERVER_CERT ?= server-cert.pem
-SERVER_KEY  ?= server-key.pem
-CA_CERT     ?= ca-cert.pem
-CA_CRL      ?= ca-crl.pem
+SERVER_CERT  ?= server-cert.pem
+SERVER_KEY   ?= server-key.pem
+CA_CERT      ?= ca-cert.pem
+CA_CRL       ?= ca-crl.pem
 
 SERVER_CERT_PATH = $(CERT_FOLDER)/$(SERVER_CERT)
 SERVER_KEY_PATH  = $(CERT_FOLDER)/$(SERVER_KEY)
@@ -71,15 +71,15 @@ CA_CERT_PATH     = $(CERT_FOLDER)/$(CA_CERT)
 CA_CRL_PATH      = $(CERT_FOLDER)/$(CA_CRL)
 
 CERT_DEFS := \
-	-D__CERT_FOLDER__=\"$(CERT_FOLDER)\" \
-	-D__SERVER_CERT_NAME__=\"$(SERVER_CERT)\" \
-	-D__SERVER_KEY_NAME__=\"$(SERVER_KEY)\" \
-	-D__CA_CERT_NAME__=\"$(CA_CERT)\" \
-	-D__CA_CRL_NAME__=\"$(CA_CRL)\" \
-	-D__SERVER_CERT_PATH__=\"$(SERVER_CERT_PATH)\" \
-	-D__SERVER_KEY_PATH__=\"$(SERVER_KEY_PATH)\" \
-	-D__CA_CERT_PATH__=\"$(CA_CERT_PATH)\" \
-	-D__CA_CRL_PATH__=\"$(CA_CRL_PATH)\"
+  -D__CERT_FOLDER__=\"$(CERT_FOLDER)\" \
+  -D__SERVER_CERT_NAME__=\"$(SERVER_CERT)\" \
+  -D__SERVER_KEY_NAME__=\"$(SERVER_KEY)\" \
+  -D__CA_CERT_NAME__=\"$(CA_CERT)\" \
+  -D__CA_CRL_NAME__=\"$(CA_CRL)\" \
+  -D__SERVER_CERT_PATH__=\"$(SERVER_CERT_PATH)\" \
+  -D__SERVER_KEY_PATH__=\"$(SERVER_KEY_PATH)\" \
+  -D__CA_CERT_PATH__=\"$(CA_CERT_PATH)\" \
+  -D__CA_CRL_PATH__=\"$(CA_CRL_PATH)\"
 
 # =============================================================================
 # Host & ports
@@ -153,16 +153,17 @@ endif
 # =============================================================================
 # Security Level SL (unified, single source of truth)
 # =============================================================================
-# SL_DEFAULT is the single authoritative hardened baseline value used by PROD
-# and BENCH — and used as the default in DEV as well.  When OCSP support is
-# enabled in the future, change SL_DEFAULT := 3 and all modes adopt that
-# hardened baseline automatically.
+# SL_DEFAULT is the single authoritative production baseline value used by PROD
+# and BENCH, and also the default in DEV. When OCSP support is enabled in
+# the future, change SL_DEFAULT := 3 and all modes adopt that baseline
+# automatically.
 #
 # Behaviour:
-#  - SL_DEFAULT ?= 2              # default hardened baseline (change to 3 later)
+#  - SL_DEFAULT ?= 2   # default production baseline (future: 3 when OCSP is implemented)
 #  - If user did not set SL on the command-line, SL is set to SL_DEFAULT.
 #  - DEV:
-#      * Defaults to SL_DEFAULT when SL not set.
+#      - Defaults to SL_DEFAULT (=2)
+#      - Allows explicit testing with SL=1 or SL=3
 #      * User MAY override SL explicitly to one of: 1, 2, 3 (DEV-only).
 #  - PROD and BENCH:
 #      * Default to SL_DEFAULT.
@@ -192,8 +193,10 @@ endif
 # ---------------------------------------------------------------------
 # Default mTLS behaviour (if the caller did NOT set mTLS on the command line)
 # - DEV SL=1  => default mTLS=0 (useful to test TLS-only by default)
-# - DEV SL>=2 => default mTLS=1 (mTLS + CRL as per SL)
-# - PROD/BENCH => default mTLS=1 (hardened)
+# - DEV SL>=2 => default mTLS=1
+#               (client authentication enabled by default;
+#                CA validation and CRL enforcement are governed by SL)
+# - PROD/BENCH => default mTLS=1 (production requirement)
 # Caller may still override with "mTLS=0" or "mTLS=1" on the make command line.
 # ---------------------------------------------------------------------
 ifneq ($(origin mTLS),command line)
@@ -204,7 +207,7 @@ ifneq ($(origin mTLS),command line)
       mTLS := 1
     endif
   else
-    # Hardened modes always enable mTLS by default
+    # Production modes always enable mTLS by default
     mTLS := 1
   endif
 endif
@@ -238,7 +241,7 @@ ifeq ($(CHECK_CERTS),1)
     MISSING_CERTS := $(strip $(foreach f,$(CERT_FILES),$(if $(wildcard $(f)),,$(f))))
     ifneq ($(MISSING_CERTS),)
       $(error $(R)CRITICAL: Missing certificate(s): $(MISSING_CERTS)$(RS) \
--> Hardened mode requires server cert/key + CA cert + CRL. Use DEV (make PROD=0) for testing or place files under $(CERT_FOLDER)/.)
+-> Production modes require server cert/key + CA cert + CRL. Use DEV (make PROD=0) for testing or place files under $(CERT_FOLDER)/.)
     endif
 
 
@@ -277,11 +280,11 @@ ifeq ($(CHECK_CERTS),1)
       endif
     endif
 
-  endif
+endif
 endif
 
 # =============================================================================
-# Hardened policy checks (Makefile-level)
+# Production policy checks (Makefile-level)
 # - mTLS=0 forbidden in PROD/BENCH
 # - SL constraints:
 #     * DEV: SL defaults to SL_DEFAULT (=2) when not set; allowed values 1,2,3
@@ -292,22 +295,22 @@ endif
 
 ifeq ($(MODE),BENCH)
   ifeq ($(mTLS),0)
-    $(error $(R)Invalid: mTLS=0 forbidden in BENCH hardened builds. Use DEV (make PROD=0) to disable mTLS.$(RS))
+    $(error $(R)Invalid: mTLS=0 forbidden in BENCH builds. Use DEV (make PROD=0) to disable mTLS.$(RS))
   endif
   ifeq ($(shell [ $(SL) -ge 2 ] && echo ok || echo bad),bad)
-    $(error $(R)Invalid: SL must be >= 2 in BENCH hardened builds$(RS))
+    $(error $(R)Invalid: SL must be >= 2 in BENCH builds$(RS))
   endif
   ifeq ($(shell [ $(SL) -ge 3 ] && echo hi || echo ok),hi)
-    $(error $(R)Invalid: SL>=3 reserved for OCSP and is forbidden in BENCH hardened builds. Use DEV to test SL>=3$(RS))
+    $(error $(R)Invalid: SL>=3 reserved for OCSP and is forbidden in BENCH builds. Use DEV to test SL>=3$(RS))
   endif
 endif
 
 ifeq ($(MODE),PROD)
   ifeq ($(mTLS),0)
-    $(error $(R)Invalid: mTLS=0 forbidden in PROD hardened builds. Use DEV (make PROD=0) to disable mTLS.$(RS))
+    $(error $(R)Invalid: mTLS=0 forbidden in PROD builds. Use DEV (make PROD=0) to disable mTLS.$(RS))
   endif
   ifeq ($(shell [ $(SL) -ge 2 ] && echo ok || echo bad),bad)
-    $(error $(R)Invalid: SL=1 forbidden in PROD hardened builds (requires SL>=2)$(RS))
+    $(error $(R)Invalid: SL>=3 reserved for OCSP and is forbidden in PROD builds. Use DEV to test SL>=3$(RS))
   endif
   ifeq ($(shell [ $(SL) -ge 3 ] && echo hi || echo ok),hi)
     $(error $(R)Invalid: SL>=3 reserved for OCSP and is forbidden in PROD hardened builds. Use DEV to test SL>=3$(RS))
@@ -348,20 +351,20 @@ ifeq ($(MODE),DEV)
 endif
 
 # =============================================================================
-# Sanitizer enforcement: disabled for hardened modes
+# Sanitiser enforcement: disabled for production modes
 # =============================================================================
 ifeq ($(MODE),DEV)
   # keep SAN as configured
 else
   SAN := 0
-endif
+  endif
 
 # =============================================================================
 # Build-mode flags & messages (PASS EXACTLY ONE OF __DEV__/__PROD__/__BENCH__ to C)
 # =============================================================================
 ifeq ($(MODE),BENCH)
   MODE_FLAGS := -D__BENCH__
-  MODE_MSG   := BENCH hardened (performance-focused)
+  MODE_MSG   := BENCH (performance testing)
   HOST       := $(BENCH_HOST)
   PORT       := $(BENCH_PORT)
   CFLAGS_EXTRA := -O2 -pipe -fstack-clash-protection -DNDEBUG
@@ -380,7 +383,7 @@ else ifeq ($(MODE),DEV)
   endif
 else
   MODE_FLAGS := -D__PROD__
-  MODE_MSG   := PROD hardened
+  MODE_MSG   := PROD (production)
   HOST       := $(PROD_HOST)
   PORT       := $(PROD_PORT)
   CFLAGS_EXTRA := -O2 -pipe -fstack-clash-protection -DNDEBUG
@@ -392,7 +395,7 @@ ifeq ($(mTLS),1)
   DEFS_MTLS := -D__REQUIRE_MUTUAL_TLS__
 else
   DEFS_MTLS := -U__REQUIRE_MUTUAL_TLS__
-endif
+  endif
 
 # mTLS message for summary
 ifeq ($(mTLS),1)
@@ -459,11 +462,29 @@ all: $(TARGET)
 	@echo "$(Y)---------------- BUILD SUMMARY ----------------$(RS)"
 	@echo "Mode:         $(C)$(MODE_MSG)$(RS)"
 ifeq ($(MODE),BENCH)
-	@echo "$(Y)Note: BENCH hardened — logs may impact timing tests$(RS)"
+	@echo "$(Y)Note: BENCH mode — logs may impact timing tests$(RS)"
 endif
 	@echo "TLS:          ON"
 	@echo "  $(mTLS_MSG)"
-	@echo "Security:     SL=$(SL) (1=TLS, 2=mTLS+CRL (Hardened), 3=mTLS+CRL+(Future)OCSP)"
+ifeq ($(MODE),DEV)
+	@if [ "$(SL)" = "1" ]; then \
+		echo "Security:     SL=1 (TLS only)"; \
+	elif [ "$(SL)" = "2" ]; then \
+		if [ "$(mTLS)" = "1" ]; then \
+			echo "Security:     SL=2 (TLS + mTLS + CRL)"; \
+		else \
+			echo "Security:     SL=2 (TLS + CRL; mTLS disabled for DEV testing)"; \
+		fi; \
+	elif [ "$(SL)" = "3" ]; then \
+		echo "Security:     SL=3 (TLS + mTLS + CRL + OCSP — DEV only)"; \
+	fi
+else
+	@if [ "$(SL)" = "2" ]; then \
+		echo "Security:     SL=2 (TLS + mTLS + CRL)"; \
+	elif [ "$(SL)" = "3" ]; then \
+		echo "Security:     SL=3 (TLS + mTLS + CRL + OCSP)"; \
+	fi
+endif
 	@echo "CA Trust:     $(C)$(CA_CERT)$(RS)"
 	@echo "Trust Chain:  $(SERVER_KEY) + $(SERVER_CERT) + $(CA_CERT)"
 	@if [ $(SL) -ge 2 ]; then \
@@ -516,7 +537,7 @@ help usage -h --help ?:
 	@echo "$(Y)Usage: make [OPTIONS] [TARGET]$(RS)"
 	@echo ""
 	@echo "$(G)Available Targets:$(RS)"
-	@echo "  make                 → Default build (PROD hardened)"
+	@echo "  make                 → Default build (PROD)"
 	@echo "  make clean           → Remove build artifacts"
 	@echo "  make help | -h | --help | ? | usage"
 	@echo "                       → Show this help"
@@ -524,9 +545,9 @@ help usage -h --help ?:
 	@echo "  make config          → Show resolved build configuration"
 	@echo ""
 	@echo "$(G)Modes (mutually exclusive):$(RS)"
-	@echo "  PROD (default)       → make  OR make PROD=1  (hardened)"
+	@echo "  PROD (default)       → make  OR make PROD=1  (production)"
 	@echo "  DEV                  → make PROD=0 (development; sanitizers & verbose logs)"
-	@echo "  BENCH                → make BENCH=1  (performance-hardened)"
+	@echo "  BENCH                → make BENCH=1  (performance testing)"
 	@echo ""
 	@echo "$(G)Important Mode Notes:$(RS)"
 	@echo "  - Only one mode is allowed at a time. Contradictory flags result in a hard error."
@@ -563,13 +584,13 @@ policy:
 	@echo "$(Y)==================== Security Policy ====================$(RS)"
 	@echo "mTLS / Security Levels:"
 	@echo "- SL=1: DEV baseline (TLS ON, mTLS optional)"
-	@echo "- SL=2: Hardened baseline (default in PROD/BENCH: mTLS + CRL required)"
+	@echo "- SL=2: Production baseline (default in PROD/BENCH: TLS + mTLS + CRL)"
 	@echo "- SL>=3: Reserved for future OCSP (not implemented). Allowed in DEV only."
 	@echo ""
 	@echo "Policy Summary:"
 	@echo "- TLS is ALWAYS ON"
 	@echo "- mTLS required in PROD/BENCH; may be disabled only in DEV"
-	@echo "- PROD/BENCH require full trust chain + CRL"
+	@echo "- PROD/BENCH require full trust chain with CRL enforcement"
 	@echo ""
 	@echo "$(Y)=============== Sanitizers ===============$(RS)"
 	@echo "SAN=1 → ASan+UBSan+LSan (DEV only)"

@@ -69,7 +69,7 @@
 =============================================================
 ASSUMING: commands are being executed from within WSL (Windows Subsystem for Linux)
 and not from within an actual terminal on Ubuntu. Hence commands using
-WILD CARDS (like '*') ahould be wrapped:
+WILD CARDS (like '*') should be wrapped:
 sudo sh -c '...'
 (where ... informs the place where the command is to be copied without the sudo command keyword.)
 
@@ -94,7 +94,7 @@ marked as a system account (defence-grade practice)
 
 Run these commands ONE TIME:
 
-# Either Step 1.a: Executed when owner name and group name are same (i.e., svc_mtls_server)
+# Preferred Step 1.a: Executed when owner name and group name are same (i.e., svc_mtls_server)
 sudo useradd \
   --system \
   --shell /usr/sbin/nologin \
@@ -103,7 +103,7 @@ sudo useradd \
   --user-group \
   svc_mtls_server
 
-# Or Step 1.b: when pner and group name are different:
+# Or alternate less preferred Step 1.b: when user and group name are different:
 sudo groupadd --system dvc_mtls_server
 sudo useradd \
     --system \
@@ -153,7 +153,7 @@ sudo chmod 750 /var/secure-mtls-server/mtls_server
 =============================================================
 Generate certificate files using generate_tls_certificates.sh
 =============================================================
-# First execute remove command manually, just to be dure the old certificates are deleted:
+# First execute remove command manually, just to be sure the old certificates are deleted:
 sudo sh -c 'rm -f ./certs/*.pem'
 
 # then check using:
@@ -172,7 +172,7 @@ NOTE: To delete files using '*.pem' within WSL when the file resides in /var/...
 # rm -f /var/secure-mtls-server/certs/*.pem
 # within:
 # sudo sh -c '
-# commad to execute
+# command to execute
 # '
 # like:
 sudo sh -c 'rm -f /var/secure-mtls-server/certs/*.pem'
@@ -225,7 +225,7 @@ gcc -std=c23 \
     -D__ALLOWED_HOST__=\"localhost\" \
     -D__TLS_PORT__=8443 -D__TLS_PORT_STR__=\"8443\" \
     -D__SECURITY_LEVEL__=2 \
-    -U__REQUIRE_MUTUAL_TLS__ \
+    -D__REQUIRE_MUTUAL_TLS__ \
     -D__LOG_ENABLE_ERROR__ -D__LOG_ENABLE_WARN__ \
     -D__LOG_ENABLE_INFO__ -D__LOG_ENABLE_DEBUG__ \
     -D__CERT_FOLDER__=\"certs\" \
@@ -254,8 +254,8 @@ gcc -std=c23 \
     -D__ALLOWED_HOST__=\"secure.lab.linux\" \
     -D__TLS_PORT__=443 -D__TLS_PORT_STR__=\"443\" \
     -D__SECURITY_LEVEL__=2 \
-    -D__LOG_ENABLE_ERROR__ -D__LOG_ENABLE_WARN__ \
-    -D__LOG_ENABLE_INFO__ -D__LOG_ENABLE_DEBUG__ \
+    -D__LOG_ENABLE_ERROR__ -U__LOG_ENABLE_WARN__ \
+    -U__LOG_ENABLE_INFO__ -U__LOG_ENABLE_DEBUG__ \
     -D__CERT_FOLDER__=\"certs\" \
     -D__SERVER_CERT_NAME__=\"server-cert.pem\" \
     -D__SERVER_KEY_NAME__=\"server-key.pem\" \
@@ -284,7 +284,7 @@ gcc -std=c23 \
     -D__TLS_PORT__=443 -D__TLS_PORT_STR__=\"443\" \
     -D__SECURITY_LEVEL__=2 \
     -D__LOG_ENABLE_ERROR__ -D__LOG_ENABLE_WARN__ \
-    -D__LOG_ENABLE_INFO__ -D__LOG_ENABLE_DEBUG__ \
+    -D__LOG_ENABLE_INFO__ -U__LOG_ENABLE_DEBUG__ \
     -D__CERT_FOLDER__=\"certs\" \
     -D__SERVER_CERT_NAME__=\"server-cert.pem\" \
     -D__SERVER_KEY_NAME__=\"server-key.pem\" \
@@ -324,10 +324,22 @@ openssl s_client -connect localhost:8443 \
 ⭐ PROD MODE TLS Client (secure.lab.linux:443)
 
 mTLS always ON
+Execute command:
+getent hosts secure.lab.linux
 
-printf "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" | \
+If above command returns an IP, then execute:
+printf "GET / HTTP/1.1\r\nHost: secure.lab.linux\r\nConnection: close\r\n\r\n" | \
 openssl s_client -connect secure.lab.linux:443 \
   -servername secure.lab.linux \
+  -CAfile ./certs/ca-cert.pem \
+  -cert ./certs/client-cert.pem \
+  -key ./certs/client-key.pem
+  -crlf
+
+Else: as the server does not exist and we are testing on a local machine/laptop/PC, execute:
+printf "GET / HTTP/1.1\r\nHost: secure.lab.linux\r\nConnection: close\r\n\r\n" | \
+openssl s_client -connect secure.lab.linux:443 \
+  -servername 127.0.0.1 \
   -CAfile ./certs/ca-cert.pem \
   -cert ./certs/client-cert.pem \
   -key ./certs/client-key.pem
