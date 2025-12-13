@@ -214,6 +214,11 @@ Certificates under: certs/
 
 ⭐ DEV BUILD:
 
+Command will change when mTLS is not needed. Possibly
+__REQUIRE_MUTUAL_TLS__ need to be undefined and
+__SECURITY_LEVEL__ to be test to 1
+
+Below command is for building DEV mode with mTLS support.
 gcc -std=c23 \
     -Wall -Wextra -Werror -Wpedantic \
     -Wformat=2 -Wshadow -Wpointer-arith \
@@ -327,7 +332,13 @@ mTLS always ON
 Execute command:
 getent hosts secure.lab.linux
 
-If above command returns an IP, then execute:
+OPTION 1:
+---------
+NOTE: If above command does not return an IP, then only for actual PRODUCTION MODE SCENARIO execute:
+Open /etc/hosts using any text editor like Vim and add nelow line:
+127.0.0.1   secure.lab.linux
+
+Then execute:
 printf "GET / HTTP/1.1\r\nHost: secure.lab.linux\r\nConnection: close\r\n\r\n" | \
 openssl s_client -connect secure.lab.linux:443 \
   -servername secure.lab.linux \
@@ -335,14 +346,17 @@ openssl s_client -connect secure.lab.linux:443 \
   -cert ./certs/client-cert.pem \
   -key ./certs/client-key.pem
   -crlf
-
-Else: as the server does not exist and we are testing on a local machine/laptop/PC, execute:
 printf "GET / HTTP/1.1\r\nHost: secure.lab.linux\r\nConnection: close\r\n\r\n" | \
-openssl s_client -connect secure.lab.linux:443 \
-  -servername 127.0.0.1 \
+
+OPTION 2:
+---------
+Else: as we are testing even the PROD mode on a local machine/laptop/PC, execute:
+printf "GET / HTTP/1.1\r\nHost: secure.lab.linux\r\nConnection: close\r\n\r\n" | \
+openssl s_client -connect 127.0.0.1:443 \
+  -servername secure.lab.linux \
   -CAfile ./certs/ca-cert.pem \
   -cert ./certs/client-cert.pem \
-  -key ./certs/client-key.pem
+  -key ./certs/client-key.pem \
   -crlf
 
 ⭐ BENCH MODE TLS Client (127.0.0.1:443)

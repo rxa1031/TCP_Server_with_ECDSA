@@ -21,13 +21,7 @@
 #define _XOPEN_SOURCE 700    /* Required on some systems for addrinfo */
 #endif // of !defined( _XOPEN_SOURCE )
 
-//#include <sys/time.h>     /* struct timeval */
-//#include <sys/select.h>   /* FD_* macros if used later */
 //#include <openssl/x509_vfy.h>   /* X509_V_FLAG_CRL_CHECK, X509_V_FLAG_CRL_CHECK_ALL */
-//#include <time.h>
-
-/* SPDX-License-Identifier: Apache-2.0 */
-/* Copyright … */
 
 /* ==== System Headers (must be first) ==== */
 #include <stdio.h>
@@ -243,10 +237,10 @@ Rules enforced here:
  *
  * Mapping:
  *
- *   __SECURITY_LEVEL__ = 1  → mTLS only
- *        - TLS always ON
+ *   __SECURITY_LEVEL__ = 1
+ *        - TLS only
  *        - mTLS optional (DEV only)
- *        - CRL/OCSP disabled
+ *        - No CRL / no OCSP
  *
  *   __SECURITY_LEVEL__ = 2  → Hardened baseline (mTLS + CRL)
  *        - TLS always ON
@@ -503,19 +497,30 @@ Rules enforced here:
         do {} while (0)
 #endif
 
+static inline const char * safe_strerror(int err, char *buf, size_t buflen)
+{
+#if ((_POSIX_C_SOURCE >= 200112L) && !defined(_GNU_SOURCE))
+    if (strerror_r(err, buf, buflen) != 0)
+    {
+        snprintf(buf, buflen, "errno %d", err);
+    }
+    return buf;
+#else
+    return strerror_r(err, buf, buflen);
+#endif
+}
+
 /*
  * Convenience logger that appends strerror_r text for the current errno.
  * Uses POSIX strerror_r semantics; falls back to "errno N" if needed.
  */
-#define LOG_ERROR_ERRNO(fmt, ...) \
-    do { \
-        char errbuf[512]; \
-        const char *errstr = errbuf; \
-        int __e = errno; \
-        if (0 != strerror_r(__e, errbuf, sizeof(errbuf))) { \
-            snprintf(errbuf, sizeof(errbuf), "errno %d", __e); \
-        } \
-        LOG_ERROR(fmt ": %s", ##__VA_ARGS__, errstr); \
+#define LOG_ERROR_ERRNO(fmt, ...)                               \
+    do {                                                        \
+        char errbuf[512];                                       \
+        const char *errstr = safe_strerror(errno,               \
+                                           errbuf,              \
+                                           sizeof(errbuf));     \
+        LOG_ERROR(fmt ": %s", ##__VA_ARGS__, errstr);           \
     } while (0)
 
 /*
@@ -1905,7 +1910,7 @@ static bool rvConfigureRevocationStore(SSL_CTX* ssl_ctx)
     }
 
 		 /* Level 1 → CRL and OCSP disabled */
-		if (__SECURITY_LEVEL__ <= 1)
+		if (__SECURITY_LEVEL__ < 2)
 		{
 				LOG_INFO("Revocation: SECURITY_LEVEL=%d → CRL=OFF, OCSP=OFF (DEV/CI only)",
 								 (int)__SECURITY_LEVEL__);
@@ -2091,6 +2096,20 @@ static bool InitialiseServer(void)
 		 * Require clients to present a certificate and verify it using our CA.
 		 */
 		SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, ((int (*)(int, X509_STORE_CTX*))NULL));
+
+		/* Allow intermediate chains up to depth 3 */
+		SSL_CTX_set_verify_depth(ctx, 3);
+
+		STACK_OF(X509_NAME)* ca_list = SSL_load_client_CA_file(CA_CERT_PATH_FULL);
+		if (((STACK_OF(X509_NAME)*)NULL) != ca_list)
+		{
+			SSL_CTX_set_client_CA_list(ctx, ca_list);
+		}
+		else
+		{
+			LOG_WARN("Warning: Failed to load client CA list from %s", CA_CERT_PATH_FULL);
+		}
+
 #else // of defined( __REQUIRE_MUTUAL_TLS__ )
     /*
      * DEV or BENCH with mTLS=0:
@@ -2104,21 +2123,6 @@ static bool InitialiseServer(void)
      *   to avoid accidental partial client-auth dependencies.
      */
 		SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, ((int (*)(int, X509_STORE_CTX*))NULL));
-#endif // of defined( __REQUIRE_MUTUAL_TLS__ )
-
-#if defined( __REQUIRE_MUTUAL_TLS__ )
-		/* Allow intermediate chains up to depth 3 */
-		SSL_CTX_set_verify_depth(ctx, 3);
-
-		STACK_OF(X509_NAME)* ca_list = SSL_load_client_CA_file(CA_CERT_PATH_FULL);
-		if (((STACK_OF(X509_NAME)*)NULL) != ca_list)
-		{
-			SSL_CTX_set_client_CA_list(ctx, ca_list);
-		}
-		else
-		{
-			LOG_WARN("Warning: Failed to load client CA list from %s", CA_CERT_PATH_FULL);
-		}
 #endif // of defined( __REQUIRE_MUTUAL_TLS__ )
 
 		/* TLS Cipher Configuration
@@ -2322,71 +2326,6 @@ static bool InitialiseServer(void)
 	return ret;
 }
 
-/* Safe & optimized case-insensitive substring search */
-static const char* pc_strcasestr(const char* haystack, const char* needle)
-{
-	const char* p_h = (const char*)NULL;
-	size_t len_h = 0U;
-	size_t len_n = 0U;
-	size_t i = 0U;
-	size_t j = 0U;
-
-	/* NULL checks */
-	if (((const char*)NULL) == haystack)
-	{
-		return (const char*)NULL;
-	}
-
-	if (((const char*)NULL) == needle)
-	{
-		return (const char*)NULL;
-	}
-
-	len_h = strlen(haystack);
-	len_n = strlen(needle);
-
-	/* Empty needle matches at beginning */
-	if (0U == len_n)
-	{
-		return haystack;
-	}
-
-	/* If impossible to match */
-	if (len_n > len_h)
-	{
-		return (const char*)NULL;
-	}
-
-	p_h = haystack;
-
-	/* Only search up to a safe point */
-	for (i = 0U; i <= (len_h - len_n); i++)
-	{
-		/* Fast-path optimization: first character must match */
-		if ((int)tolower((unsigned char)p_h[i]) != (int)tolower((unsigned char)needle[0]))
-		{
-			continue;
-		}
-
-		/* Compare subsequent characters */
-		for (j = 1U; j < len_n; j++)
-		{
-			if ((int)tolower((unsigned char)p_h[i + j]) != (int)tolower((unsigned char)needle[j]))
-			{
-				break;
-			}
-		}
-
-		/* Full match */
-		if (j == len_n)
-		{
-			return &p_h[i];
-		}
-	}
-
-	return (const char*)NULL;
-}
-
 /* Fully-validated Host header parser: IPv4, Hostname, and [IPv6] */
 static bool rv_parse_http_host(const char* host_hdr, char* out_host, size_t out_host_size)
 {
@@ -2497,142 +2436,6 @@ static bool rv_parse_http_host(const char* host_hdr, char* out_host, size_t out_
 	return ret;
 }
 
-#if defined( __REQUIRE_MUTUAL_TLS__ )
-
-/* mode_hardened: when true, enforce exactly-one-SAN and stricter rules */
-bool VerifyClientCertificate(SSL *ssl_handle,
-                             const char *allowed_identities[], size_t n_allowed,
-                             bool mode_hardened)
-{
-    if (ssl_handle == NULL) return false;
-
-    X509 *cert = SSL_get_peer_certificate(ssl_handle); /* returns a new reference or NULL */
-    if (cert == NULL) {
-        /* No cert presented */
-        fprintf(stderr, "[AUTH] No client certificate presented\n");
-        return false;
-    }
-
-    /* 1) Verify chain/trust and revocation - OpenSSL does the heavy lifting */
-    long vres = SSL_get_verify_result(ssl_handle);
-    if (vres != X509_V_OK) {
-        fprintf(stderr, "[AUTH] Certificate chain verification failed: %s\n",
-                X509_verify_cert_error_string(vres));
-        X509_free(cert);
-        return false;
-    }
-
-    /* 2) Extract SANs (RFC 6125) -- require SAN presence */
-    STACK_OF(GENERAL_NAME) *san_names = NULL;
-    san_names = (STACK_OF(GENERAL_NAME)*)X509_get_ext_d2i(cert, NID_subject_alt_name, NULL, NULL);
-    if (san_names == NULL) {
-        /* Defence-grade: reject certs without SAN */
-        fprintf(stderr, "[AUTH] Rejecting client certificate without SAN (RFC 6125)\n");
-        X509_free(cert);
-        return false;
-    }
-
-    int san_count = sk_GENERAL_NAME_num(san_names);
-    if (mode_hardened && san_count != 1) {
-        fprintf(stderr, "[AUTH] Hardened mode: expected exactly 1 SAN entry, found %d\n", san_count);
-        sk_GENERAL_NAME_pop_free(san_names, GENERAL_NAME_free);
-        X509_free(cert);
-        return false;
-    }
-
-    bool matched = false;
-
-    /* iterate SANs and compare against allowed_identities */
-    for (int i = 0; i < san_count; ++i) {
-        const GENERAL_NAME *gen = sk_GENERAL_NAME_value(san_names, i);
-        if (gen == NULL) continue;
-
-        if (gen->type == GEN_DNS) {
-            const ASN1_STRING *s = gen->d.dNSName;
-            const unsigned char *dns = ASN1_STRING_get0_data(s);
-            /* ASN1_STRING_get0_data is not NUL-terminated guarantee: but OpenSSL ensures it for dNSName */
-            if (dns == NULL) continue;
-
-            /* Exact match required in defence mode */
-            for (size_t a = 0; a < n_allowed; ++a) {
-                if (strcmp((const char*)dns, allowed_identities[a]) == 0) {
-                    matched = true;
-                    break;
-                }
-            }
-            if (matched) break;
-        }
-        else if (gen->type == GEN_URI) {
-            const ASN1_STRING *s = gen->d.uniformResourceIdentifier;
-            const unsigned char *uri = ASN1_STRING_get0_data(s);
-            if (uri == NULL) continue;
-
-            for (size_t a = 0; a < n_allowed; ++a) {
-                /* SPIFFE URIs or other policy URIs: allow prefix matching if policy permits */
-                if (strcmp((const char*)uri, allowed_identities[a]) == 0) {
-                    matched = true;
-                    break;
-                }
-                /* optionally allow exact prefix match like "spiffe://org/" */
-                /* if (strncmp((const char*)uri, allowed_identities[a], strlen(allowed_identities[a])) == 0) { matched = true; break; } */
-            }
-            if (matched) break;
-        }
-        else if (gen->type == GEN_OTHERNAME) {
-            /*
-             * Some hardened deployments place identity in otherName with a specific OID.
-             * Parsing otherName is application-specific. Here we illustrate safe extraction
-             * for UTF8String or IA5String content if present.
-             */
-            const OTHERNAME *on = gen->d.otherName;
-            if (on && on->value) {
-                /* on->value is an ASN1_TYPE. Convert to UTF8 if possible. */
-                ASN1_STRING *asn_str = on->value->value.asn1_string;
-                if (asn_str) {
-                    unsigned char *buf = NULL;
-                    int len = ASN1_STRING_to_UTF8(&buf, asn_str);
-                    if (len > 0 && buf) {
-                        for (size_t a = 0; a < n_allowed; ++a) {
-                            if (strcmp((const char*)buf, allowed_identities[a]) == 0) {
-                                matched = true;
-                                break;
-                            }
-                        }
-                        OPENSSL_free(buf);
-                        if (matched) break;
-                    }
-                }
-            }
-        }
-        else {
-            /* other SAN types (IP, email) can be handled similarly if your policy permits */
-        }
-    }
-
-    sk_GENERAL_NAME_pop_free(san_names, GENERAL_NAME_free);
-
-    if (!matched) {
-        /* not authorized by list */
-        fprintf(stderr, "[AUTH] Client certificate SAN did not match allowed identities\n");
-        X509_free(cert);
-        return false;
-    }
-
-    /*
-     * Optional: additional checks:
-     *  - Check certificate validity period manually (already done by verify_result)
-     *  - Check key usage / extendedKeyUsage for clientAuth (also checked by policy, but you can assert)
-     *  - Check certificate serial / revocation lists (if not already enforced upstream)
-     */
-
-    /* Success: certificate is valid, trusted, not revoked, and identity is authorized */
-    fprintf(stdout, "[AUTH] Client certificate accepted (identity matched)\n");
-
-    X509_free(cert);
-    return true;
-}
-#endif // of defined( __REQUIRE_MUTUAL_TLS__ )
-
 static void RunServerLoop(void)
 {
 	/* Refer file socket.h. It is evident that size of sockaddr_storage is larger than that of sockaddr */
@@ -2689,24 +2492,26 @@ static void RunServerLoop(void)
 #if defined(__DEV__)
 				ERR_print_errors_fp(stderr);
 #endif
-				close(iAcceptedClientFileDescriptor);
-				iAcceptedClientFileDescriptor = -1;
+				rvShutDownSSL_AndCloseFD(); 
 				continue;
 			}
 
 			if (0 == SSL_set_fd(ssl, iAcceptedClientFileDescriptor))
 			{
 				LOG_ERROR("SSL_set_fd failed");
-				SSL_free(ssl);
-				ssl = (SSL*)NULL;
-				close(iAcceptedClientFileDescriptor);
-				iAcceptedClientFileDescriptor = -1;
+				rvShutDownSSL_AndCloseFD(); 
 				continue;
 			}
 
 LOG_INFO(">>>> HOST = %s", host);
 
-// Only client should call SSL_set1_host(), not the server.
+/* NOTE:
+ * SSL_set1_host() is primarily a client-side API.
+ * Server-side identity verification is performed via certificate chain,
+ * SAN inspection, and application-level authorisation.
+ * Do NOT use SSL_set1_host() on the server unless implementing
+ * explicit client hostname verification logic.
+ */
 #if 0
 #if defined( __REQUIRE_MUTUAL_TLS__ )
 			/* Enforce hostname check against certificate (SAN/CN) */
@@ -2745,44 +2550,37 @@ LOG_INFO(">>>> HOST = %s", host);
 			continue;
 		}
 
-		/* ---- Start: Mutual TLS block ---- */
-#if defined( __REQUIRE_MUTUAL_TLS__ )
+/* ---- Start: Mutual TLS block ---- */
+#if defined(__REQUIRE_MUTUAL_TLS__)
 		{
-			X509* client_cert = SSL_get_peer_certificate(ssl);
-			if (NULL != client_cert)
+			long verify_result = SSL_get_verify_result(ssl);
+			if (verify_result != X509_V_OK)
 			{
-				char* subj = X509_NAME_oneline(X509_get_subject_name(client_cert), NULL, 0);
-				LOG_INFO("Client certificate subject: %s", subj);
-				OPENSSL_free(subj);
-				X509_free(client_cert);
-
-				long verify_result = SSL_get_verify_result(ssl);
-				if (X509_V_OK != verify_result)
-				{
-					LOG_ERROR("Client certificate verification failed: %s", X509_verify_cert_error_string(verify_result));
-					rvShutDownSSL_AndCloseFD();
-					continue;
-				}
-			}
-			else
-			{
-				LOG_ERROR("No client certificate presented");
+				LOG_ERROR("Client certificate verification failed: %s", X509_verify_cert_error_string(verify_result));
 				rvShutDownSSL_AndCloseFD();
 				continue;
 			}
-		}
 
-		const char *allowed[] = { "client" }; //, "spiffe://myorg/serviceX", /* ... */ };
-		bool ok = VerifyClientCertificate(ssl, allowed, sizeof(allowed)/sizeof(allowed[0]), /*mode_hardened=*/ true);
-		if (!ok)
-		{
-			/* send HTTP 403 or close */
-			rvShutDownSSL_AndCloseFD();
-			continue;
-		}
+			X509 *client_cert = SSL_get_peer_certificate(ssl);
+			if (client_cert == NULL)
+			{
+				LOG_ERROR("mTLS enabled but no client certificate presented");
+				rvShutDownSSL_AndCloseFD();
+				continue;
+			}
 
-#endif // of defined( __REQUIRE_MUTUAL_TLS__ )
-		/* ---- End: mutual TLS block ---- */
+			/* Diagnostic / optional authorisation */
+			char *subj = X509_NAME_oneline(X509_get_subject_name(client_cert), NULL, 0);
+			if (subj)
+			{
+				LOG_INFO("Client certificate subject: %s", subj);
+				OPENSSL_free(subj);
+			}
+
+			X509_free(client_cert);
+		}
+#endif
+/* ---- End: Mutual TLS block ---- */
 
 		/**** Read request (accumulate full header) ****/
 		{
@@ -2922,13 +2720,28 @@ LOG_INFO(">>>> HOST = %s", host);
 			LOG_INFO("--- Received request with %d bytes ---\n%s\n------------------------", total_bytes, buf);
 #endif
 
-			/* Find Host header */
-			const char* host_hdr = pc_strcasestr(buf, "\nhost:");
+			/* RFC-compliant CRLF line start */
+			const char * host_hdr = strstr(buf, "\r\nHost:");
+			if (!host_hdr)
+					host_hdr = strstr(buf, "\r\nhost:");
 
-			if ((const char*)NULL != host_hdr)
+			/* Tolerate LF-only clients */
+			if (!host_hdr)
+					host_hdr = strstr(buf, "\nHost:");
+			if (!host_hdr)
+					host_hdr = strstr(buf, "\nhost:");
+
+			if (host_hdr)
 			{
-				host_hdr += 6; /* past "\nhost:" */
-
+				/* Skip past header name */
+				if (host_hdr[0] == '\r')
+				{
+					host_hdr += 7; /* "\r\nHost:" */
+				}
+				else
+				{
+					host_hdr += 6; /* "\nHost:" */
+				}
 				/* Skip leading SP / HTAB */
 				while ((' ' == *host_hdr) || ('\t' == *host_hdr))
 				{
