@@ -194,8 +194,8 @@ endif
 # Default mTLS behaviour (if the caller did NOT set mTLS on the command line)
 # - DEV SL=1  => default mTLS=0 (useful to test TLS-only by default)
 # - DEV SL>=2 => default mTLS=1
-#               (client authentication enabled by default;
-#                CA validation and CRL enforcement are governed by SL)
+#               (default DEV posture mirrors production trust:
+#                mTLS enabled; CRL enforcement follows SL)
 # - PROD/BENCH => default mTLS=1 (production requirement)
 # Caller may still override with "mTLS=0" or "mTLS=1" on the make command line.
 # ---------------------------------------------------------------------
@@ -297,8 +297,8 @@ ifeq ($(MODE),BENCH)
   ifeq ($(mTLS),0)
     $(error $(R)Invalid: mTLS=0 forbidden in BENCH builds. Use DEV (make PROD=0) to disable mTLS.$(RS))
   endif
-  ifeq ($(shell [ $(SL) -ge 2 ] && echo ok || echo bad),bad)
-    $(error $(R)Invalid: SL must be >= 2 in BENCH builds$(RS))
+  ifeq ($(SL),1)
+    $(error $(R)Invalid: SL=1 (TLS-only) is forbidden in BENCH builds$(RS))
   endif
   ifeq ($(shell [ $(SL) -ge 3 ] && echo hi || echo ok),hi)
     $(error $(R)Invalid: SL>=3 reserved for OCSP and is forbidden in BENCH builds. Use DEV to test SL>=3$(RS))
@@ -309,12 +309,7 @@ ifeq ($(MODE),PROD)
   ifeq ($(mTLS),0)
     $(error $(R)Invalid: mTLS=0 forbidden in PROD builds. Use DEV (make PROD=0) to disable mTLS.$(RS))
   endif
-  ifeq ($(shell [ $(SL) -ge 2 ] && echo ok || echo bad),bad)
-    $(error $(R)Invalid: SL>=3 reserved for OCSP and is forbidden in PROD builds. Use DEV to test SL>=3$(RS))
-  endif
-  ifeq ($(shell [ $(SL) -ge 3 ] && echo hi || echo ok),hi)
-    $(error $(R)Invalid: SL>=3 reserved for OCSP and is forbidden in PROD hardened builds. Use DEV to test SL>=3$(RS))
-  endif
+  # SL is enforced earlier to SL_DEFAULT (=2): TLS + mTLS + CRL are mandatory
 endif
 
 ifeq ($(DEBUG),1)
@@ -480,7 +475,7 @@ ifeq ($(MODE),DEV)
 	fi
 else
 	@if [ "$(SL)" = "2" ]; then \
-		echo "Security:     SL=2 (TLS + mTLS + CRL)"; \
+		echo "Security:     SL=2 (TLS + mTLS + CRL — enforced)"; \
 	elif [ "$(SL)" = "3" ]; then \
 		echo "Security:     SL=3 (TLS + mTLS + CRL + OCSP)"; \
 	fi
@@ -574,10 +569,10 @@ help usage -h --help ?:
 	@echo "  - PROD/BENCH disable DEBUG; BENCH can enable WARN/INFO explicitly."
 	@echo ""
 	@echo "Examples:"
-	@echo "  make                  # PROD hardened"
+	@echo "  make                  # PROD (production)"
 	@echo "  make PROD=0           # DEV (sanitizers + verbose logs)"
 	@echo "  make PROD=0 SL=3      # DEV with SL=3 (for OCSP development/testing)"
-	@echo "  make BENCH=1          # BENCH hardened (must be BENCH=1 exactly)"
+	@echo "  make BENCH=1          # BENCH (performance testing) (must be BENCH=1 exactly)"
 	@echo ""
 
 policy:
