@@ -17,7 +17,7 @@ separately by third-party authors. Users must comply with those terms.
 |------|---------|------|----------------|-----------------|------------------|
 | **PROD** | Hardened deployment | Required | **2** | ERROR only | Must start as root → chroot + drop to svc_mtls_server |
 | **BENCH** | Performance testing | Required | **2** | ERROR only | Must start as root → chroot + drop to svc_mtls_server |
-| **DEV** | Debug + development | Optional | **1** | ERROR+WARN+INFO+DEBUG | No chroot + sanitizers enabled |
+| **DEV** | Debug + development | Configurable | **1** | ERROR+WARN+INFO+DEBUG | No chroot + sanitizers enabled |
 
 > **TLS encryption is always ON** in all modes (no plaintext allowed).  
 > Only authentication enforcement levels change.
