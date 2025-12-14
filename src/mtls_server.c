@@ -9,6 +9,533 @@
  * Full Apache 2.0 license text is provided in the LICENSE file.
  */
 
+/**
+===============================================================================
+@file   TCP_Server.c
+@brief  Hardened TLS Server (default) with Configurable Build Security Modes
+
+Default build behaviour (when running plain "make"):
+
+    - PROD mode (hardened security, minimal logs).
+    - Mutual TLS enabled (mTLS=1, client certificate required).
+    - Strict HTTP Host enforcement using __ALLOWED_HOST__.
+    - TLS listener on TCP port 443 (standard HTTPS/TLS port).
+
+User-configurable build-time security modes and options:
+
+    - Security mode:
+        * PROD  (default, hardened deployment)
+        * DEV   (debugging and sanitisers)
+        * BENCH (performance benchmarking)
+
+    - TLS authentication:
+        * mTLS=1: mutual TLS (client certificate required)
+        * mTLS=0: server-auth TLS only (no client certificate requested)
+
+    - Logging visibility:
+        * WARN, INFO, DEBUG enabled/disabled via Make flags,
+          subject to strict per-mode policy (DEBUG forbidden in PROD/BENCH).
+
+The final server binary is fully user configurable at build time via the
+Makefile flags, with the default configuration being a hardened PROD TLS
+server with strict host enforcement.
+
+-------------------------------------------------------------------------------
+Security Level (__SECURITY_LEVEL__)
+-------------------------------------------------------------------------------
+
+The Makefile defines __SECURITY_LEVEL__ (integer macro) to control both
+authentication and revocation behaviour:
+
+    __SECURITY_LEVEL__ = 1
+        - mTLS only.
+        - CRL/OCSP disabled.
+        - Intended for DEV / CI builds only.
+
+    __SECURITY_LEVEL__ = 2
+        - Hardened baseline.
+        - CRL-based revocation checking enabled and required in PROD/BENCH.
+        - Server is expected to load and use CRLs for peer validation.
+
+    __SECURITY_LEVEL__ = 3
+        - Intended for CRL + OCSP in the future.
+        - OCSP support is NOT yet implemented in this server.
+        - In DEV builds: compilation emits a warning and runtime logs a warning.
+        - In PROD/BENCH builds: compilation fails (hardened builds must not
+          claim OCSP support until fully implemented and validated).
+
+===============================================================================
+BUILD MODES (MAKEFILE-CONTROLLED)
+===============================================================================
+
+Mode selection rules (mutually exclusive, invalid combinations rejected)
+Any build that defines more than one mode macro (__DEV__, __BENCH__)
+or violates policy constraints (for example, mTLS=0 in PROD/BENCH)
+is rejected at Makefile or compile time.
+
+    1) BENCH	-> BENCH mode
+    2) DEV    -> DEV mode
+    3) PROD		-> PROD mode (default)
+
+Effective compile-time state:
+
+    - DEV build:   __DEV__ is defined; __BENCH__ is not defined.
+    - BENCH build: __BENCH__ is defined; __DEV__ is not defined.
+    - PROD build:  neither __DEV__ nor __BENCH__ is defined (treated as PROD).
+
+TLS is ALWAYS enabled in all modes (no plain TCP).
+
+-------------------------------------------------------------------------------
+mTLS selection (via Makefile)
+-------------------------------------------------------------------------------
+
+    mTLS=1 (default):
+        - Mutual TLS (client certificate required).
+        - Server certificate is presented to the client.
+        - Client certificate must be presented and validated.
+        - Hostname verification uses TLS SNI / certificate SAN.
+        - Compile-time: __REQUIRE_MUTUAL_TLS__ defined.
+
+    mTLS=0:
+        - Server-auth TLS only (no client certificate requested).
+        - Server certificate is validated by the client.
+        - TLS encryption is still enforced; only mutual authentication is
+          disabled.
+        - Compile-time: __REQUIRE_MUTUAL_TLS__ not defined.
+
+All modes listen on TCP port 443 by default. Binding to port 443 normally
+requires starting as root and then dropping privileges.
+
+-------------------------------------------------------------------------------
+Mode capabilities summary
+-------------------------------------------------------------------------------
+
+-----+------+----------------------+----------------------------+-----------------------------+--------------------------
+Mode | mTLS | Client Cert (mTLS=1) | Logging Allowed            | Host Enforcement            | Typical Use
+-----+------+----------------------+----------------------------+-----------------------------+--------------------------
+PROD | 1    | Required when mTLS=1 | ERROR only                 | Strict reject on mismatch   | Hardened deployment
+DEV  | 1    | Required when mTLS=1 | ERROR/WARN/INFO/DEBUG      | Warning only (no reject)    | Development and debugging
+BENCH| 1    | Required when mTLS=1 | ERROR + optional WARN/INFO | Logged only, no reject      | Performance benchmarking
+
+============================================================================
+TLS AND MUTUAL TLS (mTLS) POLICY — FINAL CANONICAL DEFINITION
+============================================================================
+
+TLS — ALWAYS ON
+----------------
+ - TLS is ALWAYS ENABLED in ALL build modes (PROD / BENCH / DEV).
+ - Plain TCP / cleartext is strictly forbidden in all modes.
+ - Build tools do NOT allow disabling TLS under any circumstance.
+
+
+Mutual TLS (client certificate authentication)
+----------------------------------------------
+ - Default: ENABLED in ALL modes.
+
+ - PROD mode:
+     * mTLS = ON is mandatory.
+     * Makefile blocks mTLS=0 builds.
+
+ - BENCH mode:
+     * mTLS = ON is mandatory.
+     * Makefile blocks mTLS=0 builds.
+
+ - DEV mode:
+     * mTLS can be turned OFF for local debugging or integration testing.
+     * When mTLS=0 (mTLS disabled):
+         - TLS encryption still enforced.
+         - No client certificate requested.
+         - CRL is optional.
+         - Host mismatch logs WARNING but request is allowed.
+
+
+Security rationale
+------------------
+ - mTLS required for hardened deployments → strict client identity validation.
+ - Developer iteration must be frictionless → allow mTLS OFF temporarily.
+
+
+Summary Matrix
+--------------
+  Mode   | TLS | mTLS (mTLS=1 required?) | Policy
+  -------+-----+-------------------------+------------------------------------
+  PROD   | ON  | ALWAYS ON               | Hardened deployment — fail closed
+  BENCH  | ON  | ALWAYS ON               | Performance measurement — hardened
+  DEV    | ON  | ON (default) or OFF     | Debug mode — fail open allowed
+
+
+Enforcement
+-----------
+ - Makefile prevents invalid builds:
+     PROD/BENCH + mTLS=0 → build error
+     DEBUG logging without DEV → build error
+
+ - C code enforces:
+     * SSL_CTX_verify behaviour based on mTLS setting:
+         - mTLS=1 (__REQUIRE_MUTUAL_TLS__ defined):
+             SSL_CTX_set_verify(ctx,
+                 SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+      
+             Effect:
+                 • Client certificate is REQUIRED
+                 • Certificate chain is verified against CA
+                 • CRL enforcement applies when SECURITY_LEVEL >= 2
+                 • Handshake fails if client cert is missing or invalid
+      
+         - mTLS=0 (__REQUIRE_MUTUAL_TLS__ not defined):
+             SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+      
+             Effect:
+                 • Client certificate is NOT requested
+                 • TLS encryption remains enforced
+                 • Server certificate is still presented and authenticated
+      
+       This behaviour is intentional and compliant with standard OpenSSL
+       server-auth vs mutual-auth TLS models.
+     * Host mismatch: reject in PROD/BENCH, warn-only in DEV
+     * Revocation required in PROD/BENCH only
+
+============================================================================
+*/
+
+/**
+===============================================================================
+SYSTEM PREREQUISITES AND WHY THEY ARE REQUIRED
+===============================================================================
+
+Compiler requirements:
+
+    Minimum required:
+        - GCC 13 and g++ 13 or newer.
+
+    Recommended:
+        - Install the latest stable GCC and g++ versions available in your
+          distribution repositories (for example: GCC 15 and g++ 15 if
+          available).
+
+    Rule:
+        - Choose a single GCC major version V >= 13 (for example 13 or 15)
+          and use that same V consistently in all commands below:
+              gcc-V, g++-V, /usr/bin/gcc-V, /usr/bin/g++-V.
+
+    Reason:
+        - This project uses C23 features and modern security hardening flags.
+          Earlier compilers (such as GCC 11 or below, commonly installed by
+          default in many systems) will fail during compilation or lack
+          required diagnostics.
+
+Check current GCC version:
+
+    gcc --version
+
+If gcc < 13, upgrade toolchain as follows. In all commands below, replace
+"<V>" with the major version you are installing (for example 13 or 15).
+
+Step 1: enable access to recent toolchains:
+
+    sudo apt install software-properties-common
+    sudo add-apt-repository ppa:ubuntu-toolchain-r/test
+    sudo apt update
+
+    software-properties-common:
+        - Provides add-apt-repository utility.
+    add-apt-repository / apt update:
+        - Enable and refresh the toolchain PPA for newer GCC.
+
+Step 2: install compilers and essential build tools (using your chosen <V>):
+
+    sudo apt install gcc-<V> g++-<V>
+    sudo apt install build-essential apt-file openssl libssl-dev
+    sudo apt-file update
+
+    gcc-<V>, g++-<V>:
+        - Required compilers (C23 features used in this project).
+        - Examples:
+            * Minimum: gcc-13 g++-13
+            * Newer:   gcc-15 g++-15 (if available on your system)
+    build-essential:
+        - Installs make, linker, and C runtime headers.
+    apt-file, apt-file update:
+        - Allows searching which package provides a missing header/library.
+    openssl:
+        - Provides openssl CLI tools (including s_client) for testing.
+    libssl-dev:
+        - Provides OpenSSL headers and libraries required for compilation.
+
+Step 3: select GCC <V> as the default compiler:
+
+    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-<V> 100
+    sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-<V> 100
+    sudo update-alternatives --config gcc
+
+    update-alternatives:
+        - Ensures gcc and g++ invoke the chosen GCC version <V> by default.
+        - Use the same <V> here that you installed in the previous step.
+
+Examples:
+
+    Minimum supported (V=13):
+
+        sudo apt install gcc-13 g++-13
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100
+
+    Newer toolchain (V=15, if available):
+
+        sudo apt install gcc-15 g++-15
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 100
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-15 100
+
+
+Optional: JSON audit utility (recommended for CI/test environments)
+
+    sudo apt install jq
+
+    jq:
+        - Used by test_builds.sh to merge per-build JSON results into
+          summary.json for audit and compliance visibility.
+        - If jq is not installed, test_builds.sh will still run using a
+          minimal JSON summary (no runtime dependency in the server).
+
+Optional: build a recent OpenSSL from source if system OpenSSL is too old:
+
+    mkdir ~/openssl_3_5
+    cd ~/openssl_3_5
+    wget https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz
+    tar xzvf openssl-3.5.4.tar.gz
+    cd openssl-3.5.4
+    ./config
+    make
+    sudo make install
+    openssl version -a
+
+Purpose:
+
+    - Guarantees a recent OpenSSL 3.x version with modern TLS 1.3 support.
+    - Avoids limitation of older distributions with outdated libssl.
+
+Troubleshooting system packages:
+
+    sudo apt list --upgradable
+    sudo apt full-upgrade
+
+    - Use these to bring system packages up to date.
+
+If apt repeatedly warns about snapd:
+
+    sudo apt-get --simulate install snapd
+    sudo apt-get install snapd
+
+    - These clear pending snapd-related upgrade warnings, if present.
+    - They do not affect the TLS server itself but keep the package manager
+      in a consistent state.
+
+Summary of installed packages and commands:
+
+    software-properties-common   -> Needed for add-apt-repository
+    add-apt-repository           -> Adds toolchain PPA for GCC upgrades
+    apt update                   -> Refreshes package index
+    gcc-<V>, g++-<V> (V >= 13)   -> Required compilers for C23 code
+    build-essential              -> Core build toolkit (make, ld, headers)
+    apt-file, apt-file update    -> Helps locate missing headers/libraries
+    openssl, libssl-dev          -> Runtime and development support for TLS
+    jq (optional)                -> JSON compliance audit reports for CI
+    update-alternatives ...      -> Switches system to chosen GCC <V> by default
+    make / sudo make install     -> Builds and installs OpenSSL from source
+    openssl version -a           -> Verifies installed OpenSSL version
+    apt list / full-upgrade      -> Resolves outdated or missing packages
+    apt-get ... snapd            -> Cleans up snapd warnings if necessary
+
+*/
+
+/* ============================================================================
+ * REQUIRED CERTIFICATE ARTIFACTS AND EXACT OPENSSL COMMANDS (ECDSA)
+ * ============================================================================
+ *
+ * All certificate/key files reside under:
+ *
+ *     <repo-root>/certs/
+ *
+ * This server requires the following artifacts (filenames fixed by Makefile):
+ *
+ *   - server-key.pem   → Server private key (ECDSA)
+ *   - server-cert.pem  → Server X.509 certificate (signed by CA)
+ *   - ca-cert.pem      → Certificate Authority – public trust anchor
+ *   - ca-crl.pem       → Certificate Revocation List (required in hardened modes)
+ *   - client-key.pem   → Client private key (ECDSA, mTLS only)
+ *   - client-cert.pem  → Client certificate (mTLS only)
+ *
+ * Runtime Requirements Per Build Mode
+ * ----------------------------------
+ *
+ *   Mode    | TLS | mTLS | CRL | Required Files
+ *   --------+-----+------+-----+-----------------------------------------------
+ *   PROD    | ON  | YES  | YES | server-key.pem
+ *           |     |      |     | server-cert.pem
+ *           |     |      |     | ca-cert.pem
+ *           |     |      |     | ca-crl.pem
+ *           |     |      |     | client-key.pem + client-cert.pem (client side)
+ *
+ *   BENCH   | ON  | YES  | YES | Same as PROD
+ *
+ *   DEV     | ON  | optional | optional | always: server-key.pem, server-cert.pem, ca-cert.pem
+ *           |                |          | optional: ca-crl.pem
+ *           |                |          | optional: client-key.pem + client-cert.pem
+ *
+ * NOTE:
+ *   - TLS is ALWAYS ON in ALL MODES — plain TCP is forbidden.
+ *   - In PROD/BENCH: missing mTLS/CRL files → server initialisation fails.
+ *   - In DEV: missing optional files logs warnings but server runs for testing.
+ *
+ * ---------------------------------------------------------------------------
+ * CERTIFICATE GENERATION (OpenSSL CLI) — ECDSA (prime256v1 / P-256)
+ * ---------------------------------------------------------------------------
+ *
+ * Execute these commands from: <repo-root>/certs/
+ *
+ * RATIONALE:
+ *   - Your server ciphers use ECDHE-ECDSA; therefore CA, server and client
+ *     keys must be ECDSA keys (not RSA). We recommend prime256v1 (P-256).
+ *   - SAN must include the hostnames/IPs your clients will use (SNI + HTTP Host).
+ *
+ * 1) Root CA (one-time)
+ * --------------------
+ *   # Generate CA private key (ECDSA P-256)
+ *   openssl ecparam -name prime256v1 -genkey -noout -out ca-key.pem
+ *
+ *   # Self-signed CA certificate (e.g. 5 years)
+ *   openssl req -x509 -new -key ca-key.pem -sha256 -days 1825 \
+ *       -subj "/CN=Security-Authority-Root-CA" -out ca-cert.pem
+ *
+ *
+ * 2) Server Certificate (required in ALL MODES)
+ * --------------------------------------------
+ *   # Generate EC server key
+ *   openssl ecparam -name prime256v1 -genkey -noout -out server-key.pem
+ *
+ *   # Create SAN extension file — adjust names/IPs per your Makefile mode
+ *   cat > server-san.ext <<EOF
+ *   subjectAltName=DNS:secure.lab.linux,IP:127.0.0.1
+ *   EOF
+ *
+ *   # Create CSR
+ *   openssl req -new -key server-key.pem -out server.csr \
+ *       -subj "/CN=secure.lab.linux"
+ *
+ *   # Sign server certificate with CA (shorter validity for servers is OK)
+ *   openssl x509 -req -in server.csr \
+ *       -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
+ *       -out server-cert.pem -days 825 -sha256 -extfile server-san.ext
+ *
+ *   rm -f server.csr server-san.ext
+ *
+ *
+ * 3) Client Certificate (ONLY when mTLS is enabled)
+ * ------------------------------------------------
+ *   # Generate EC client key
+ *   openssl ecparam -name prime256v1 -genkey -noout -out client-key.pem
+ *
+ *   # Create CSR for client
+ *   openssl req -new -key client-key.pem -out client.csr \
+ *       -subj "/CN=Secure-Client"
+ *
+ *   # Sign client certificate with CA
+ *   openssl x509 -req -in client.csr \
+ *       -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
+ *       -out client-cert.pem -days 825 -sha256
+ *
+ *   rm -f client.csr
+ *
+ *
+ * 4) Certificate Revocation List (required in PROD/BENCH or SECURITY_LEVEL>=2)
+ * ----------------------------------------------------------------------------
+ *   # Initialise CA db for openssl ca (one-time in certs/)
+ *   touch index.txt
+ *   echo 01 > serial
+ *
+ *   # Create CRL (validity chosen as example)
+ *   openssl ca -gencrl -keyfile ca-key.pem -cert ca-cert.pem -out ca-crl.pem -crldays 30
+ *
+ *
+ * ---------------------------------------------------------------------------
+ * SECURITY RATIONALE & MANAGEMENT NOTES
+ * ---------------------------------------------------------------------------
+ *  - CA private key (ca-key.pem) must be protected and kept offline for real production.
+ *  - SAN entries must match the SNI and the __ALLOWED_HOST__ used by clients.
+ *  - Use ECDSA keys so server uses ECDHE-ECDSA suites; do NOT generate RSA keys.
+ *  - SERVER REQUIRES (always): server-key.pem, server-cert.pem, ca-cert.pem
+ *  - SECURITY_LEVEL >= 2: requires ca-crl.pem (revocation enforced at runtime).
+ *  - mTLS=1: client-key.pem + client-cert.pem required for client-side authentication.
+ *
+ * ============================================================================
+ */
+
+/**
+===============================================================================
+DIRECT GCC BUILD (DEVELOPER ONLY, NOT HARDENED)
+===============================================================================
+
+The recommended way to build is via the Makefile, using one of the 34 valid
+make commands described above. Direct gcc commands should only be used for
+quick local tests. These commands bypass Makefile policy checks and are not
+policy-complete.
+
+1) Simple functional test (no extra hardening):
+
+    gcc TCP_Server.c -o TCP_Server -lssl -lcrypto
+
+2) Closer to PROD-style warnings and optimisation:
+
+    gcc -std=c2x TCP_Server.c -o TCP_Server \
+        -Wall -Wextra -Werror -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -O2 \
+        -lssl -lcrypto
+
+These direct builds:
+
+    - Do NOT apply the full hardening that the Makefile adds.
+    - Do NOT enforce the same mode, logging, and host policies automatically.
+    - Should NOT be used for hardened deployment.
+
+For real deployments or benchmarks, always use the Makefile with a valid
+(PROD / DEV / BENCH, mTLS, and logging) combination.
+
+===============================================================================
+@section security_compliance Security Compliance Summary (S16)
+===============================================================================
+
+This software is designed for hardened operational deployment only when built
+using the Makefile in a valid PROD or BENCH configuration with:
+
+		- TLS encryption always enabled, and
+		- Mutual TLS (mTLS=1) enforced by policy in PROD/BENCH.
+
+These Makefile builds apply:
+
+    - Full compiler and linker security hardening flags,
+    - Denial of DEBUG logging in production and benchmarking modes,
+    - Strict or logged HTTP Host enforcement, and
+    - Chroot and privilege drop requirements (PROD/BENCH only).
+
+DEBUG logging, unrestricted host acceptance, or the absence of privilege and
+filesystem isolation significantly reduces security posture. Therefore:
+
+    - Any build that enables DEBUG logging outside of DEV mode, or
+    - Any binary produced outside of Makefile enforcement,
+
+shall not be deployed or executed in an operational or production environment.
+
+DEV builds are permitted solely for development and troubleshooting and are not
+authorised for deployment. All production or benchmark usage must use a valid
+Makefile-controlled hardened build that meets the requirements above.
+
+===============================================================================
+END OF BUILD / TEST / SECURITY / SYSTEM REQUIREMENTS DOCUMENTATION
+===============================================================================
+*/
+
 #if !defined( _DEFAULT_SOURCE )
 #define _DEFAULT_SOURCE     /* request GNU extensions */
 #endif // of !defined( _DEFAULT_SOURCE )
@@ -48,8 +575,6 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/x509v3.h>
-
-/* ==== Then all code comments, macros, policies ==== */
 
 /* ============================================================================
  * Compile-time TLS port and certificate paths (runtime-relative)
@@ -125,7 +650,7 @@ Build modes (selected via Makefile → GCC -D defines):
 
         Intended use:
             - Development and debugging
-            - Sanitizers enabled via Makefile (e.g. -fsanitize=address,undefined)
+            - Sanitisers enabled via Makefile (e.g. -fsanitize=address,undefined)
             - Logging may include WARN / INFO / DEBUG if corresponding
               __LOG_ENABLE_* macros are defined.
 
@@ -135,7 +660,7 @@ Build modes (selected via Makefile → GCC -D defines):
 
         Intended use:
             - Performance / benchmarking
-            - Optimized build
+            - Optimised build
             - DEBUG logging is forbidden to avoid disturbing timing.
 
     - PROD build (default):
@@ -199,10 +724,10 @@ Rules enforced here:
         * DEBUG (__LOG_ENABLE_DEBUG__) is forbidden.
 
     - DEV:
-        * WARN, INFO, and DEBUG are all enabled by default.
-        * Each may be individually disabled or re-enabled via their associated flags, namely:
+        * WARN, INFO, and DEBUG are enabled by default via the Makefile.
+        * Each may be individually disabled or re-enabled via their associated flags:
           __LOG_ENABLE_WARN__, __LOG_ENABLE_INFO__, __LOG_ENABLE_DEBUG__
-        * Sanitizers are typically enabled (SAN=1 by default).
+        * Sanitisers are typically enabled (SAN=1 by default).
 
     - __LOG_ENABLE_DEBUG__ is only allowed when __DEV__ is defined.
       (DEBUG logging is forbidden in PROD and BENCH builds.)
@@ -220,7 +745,7 @@ Rules enforced here:
  *   Mode   | mTLS Required? | Comments
  *   -------+----------------+-----------------------------------------------
  *   PROD   | YES            | Hardened deployment — fail-closed
- *   BENCH  | YES            | Performance test — hardened trust behavior
+ *   BENCH  | YES            | Performance test — hardened trust behaviour
  *   DEV    | OPTIONAL       | Developer convenience
  *                            Enable mTLS explicitly:
  *                              make DEV mTLS=1
@@ -254,153 +779,57 @@ Rules enforced here:
  *        - Allowed only in DEV builds
  *        - PROD/BENCH builds must reject SECURITY_LEVEL >= 3
  *
- * CRL must exist in hardened builds when SECURITY_LEVEL >= 3.
+ * CRL must exist in hardened builds when SECURITY_LEVEL >= 2.
  * In DEV, default security level is __SECURITY_LEVEL__ = 1, unless set
- * explicitly to a higher value. thus CRL is optional and failure to configure it only logs a warning.
- *
- * ---------------------------------------------------------------------------
- * Trust Roles and Dependencies — Visual Trust Chain
- * ---------------------------------------------------------------------------
- *
- *    [ ca-key.pem ] (CA private key)
- *          │   highly protected, NEVER shipped
- *          ▼
- *    [ ca-cert.pem ] (Public root of trust)
- *          │
- *          ├── signs server.csr → [ server-cert.pem ]
- *          │                         validates server identity
- *          │
- *          ├── signs client.csr → [ client-cert.pem ] (mTLS only)
- *          │                         validates client identity
- *          │
- *          └── signs CRL → [ ca-crl.pem ]
- *                                lists revoked serial numbers
- *
- * Server ALWAYS needs:  server-key.pem, server-cert.pem, ca-cert.pem
- * CRL is required in hardened builds:  ca-crl.pem
- * Client artifacts only required in mTLS mode: client-key.pem + client-cert.pem
- * ============================================================================
+ * explicitly to a higher value. Thus CRL is optional and failure to configure it only logs a warning.
  */
-
+ 
 /* ============================================================================
- * REQUIRED CERTIFICATE ARTIFACTS AND EXACT OPENSSL COMMANDS (ECDSA)
+ *                    CERTIFICATE CHAIN — VISUAL TRUST FLOW
  * ============================================================================
  *
- * All certificate/key files reside under:
+ *                             (Root of Trust)
+ *                            ┌────────────────┐
+ *                            │   ca-key.pem   │  ← CA PRIVATE KEY
+ *                            │(never shipped) │
+ *                            └───────▲────────┘
+ *                                    │ signs
+ *                                    │
+ *                            ┌────────────────┐
+ *                            │  ca-cert.pem   │  ← CA CERTIFICATE (public)
+ *                            └───────┬────────┘
+ *                                    │
+ *     ┌──────────────────────────────┼──────────────────────────────┐
+ *     │                              │                              │
+ *     ▼                              ▼                              ▼
  *
- *     <repo-root>/certs/
+ *  SERVER CERT PATH           CLIENT CERT PATH                 CRL PATH
+ *  ------------------         ------------------               -------------
  *
- * This server requires the following artifacts (filenames fixed by Makefile):
+ *   server-key.pem             client-key.pem                  ca-crl.pem
+ *   server.csr                 client.csr                      (revocations)
+ *        │                          │
+ *        └──── signed by CA ────────┘
  *
- *   - server-key.pem   → Server private key (ECDSA)
- *   - server-cert.pem  → Server X.509 certificate (signed by CA)
- *   - ca-cert.pem      → Certificate Authority – public trust anchor
- *   - ca-crl.pem       → Certificate Revocation List (required in hardened modes)
- *   - client-key.pem   → Client private key (ECDSA, mTLS only)
- *   - client-cert.pem  → Client certificate (mTLS only)
+ *   server-cert.pem            client-cert.pem
  *
- * Runtime Requirements Per Build Mode
- * ----------------------------------
+ * ============================================================================
+ * RUNTIME REQUIREMENTS
+ * ============================================================================
  *
- *   Mode    | TLS | mTLS | CRL | Required Files
- *   --------+-----+------+-----+-----------------------------------------------
- *   PROD    | ON  | YES  | YES | server-key.pem
- *           |     |      |     | server-cert.pem
- *           |     |      |     | ca-cert.pem
- *           |     |      |     | ca-crl.pem
- *           |     |      |     | client-key.pem + client-cert.pem (client side)
+ * SERVER must have:
+ *      ✔ server-key.pem
+ *      ✔ server-cert.pem
+ *      ✔ ca-cert.pem
+ *      ✔ ca-crl.pem           (required when SECURITY_LEVEL ≥ 2)
  *
- *   BENCH   | ON  | YES  | YES | Same as PROD
+ * CLIENT (mTLS only) must have:
+ *      ✔ client-key.pem
+ *      ✔ client-cert.pem
+ *      ✔ ca-cert.pem
  *
- *   DEV     | ON  | optional | optional | always: server-key.pem, server-cert.pem, ca-cert.pem
- *           |                |          | optional: ca-crl.pem
- *           |                |          | optional: client-key.pem + client-cert.pem
- *
- * NOTE:
- *   - TLS is ALWAYS ON in ALL MODES — plain TCP is forbidden.
- *   - In PROD/BENCH: missing mTLS/CRL files → server initialization fails.
- *   - In DEV: missing optional files logs warnings but server runs for testing.
- *
- * ---------------------------------------------------------------------------
- * CERTIFICATE GENERATION (OpenSSL CLI) — ECDSA (prime256v1 / P-256)
- * ---------------------------------------------------------------------------
- *
- * Execute these commands from: <repo-root>/certs/
- *
- * RATIONALE:
- *   - Your server ciphers use ECDHE-ECDSA; therefore CA, server and client
- *     keys must be ECDSA keys (not RSA). We recommend prime256v1 (P-256).
- *   - SAN must include the hostnames/IPs your clients will use (SNI + HTTP Host).
- *
- * 1) Root CA (one-time)
- * --------------------
- *   # Generate CA private key (ECDSA P-256)
- *   openssl ecparam -name prime256v1 -genkey -noout -out ca-key.pem
- *
- *   # Self-signed CA certificate (e.g. 5 years)
- *   openssl req -x509 -new -key ca-key.pem -sha256 -days 1825 \
- *       -subj "/CN=Security-Authority-Root-CA" -out ca-cert.pem
- *
- *
- * 2) Server Certificate (required in ALL MODES)
- * --------------------------------------------
- *   # Generate EC server key
- *   openssl ecparam -name prime256v1 -genkey -noout -out server-key.pem
- *
- *   # Create SAN extension file — adjust names/IPs per your Makefile mode
- *   cat > server-san.ext <<EOF
- *   subjectAltName=DNS:secure.lab.linux,IP:127.0.0.1
- *   EOF
- *
- *   # Create CSR
- *   openssl req -new -key server-key.pem -out server.csr \
- *       -subj "/CN=secure.lab.linux"
- *
- *   # Sign server certificate with CA (shorter validity for servers is OK)
- *   openssl x509 -req -in server.csr \
- *       -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
- *       -out server-cert.pem -days 825 -sha256 -extfile server-san.ext
- *
- *   rm -f server.csr server-san.ext
- *
- *
- * 3) Client Certificate (ONLY when mTLS is enabled)
- * ------------------------------------------------
- *   # Generate EC client key
- *   openssl ecparam -name prime256v1 -genkey -noout -out client-key.pem
- *
- *   # Create CSR for client
- *   openssl req -new -key client-key.pem -out client.csr \
- *       -subj "/CN=Secure-Client"
- *
- *   # Sign client certificate with CA
- *   openssl x509 -req -in client.csr \
- *       -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
- *       -out client-cert.pem -days 825 -sha256
- *
- *   rm -f client.csr
- *
- *
- * 4) Certificate Revocation List (required in PROD/BENCH or SECURITY_LEVEL>=2)
- * ----------------------------------------------------------------------------
- *   # Initialize CA db for openssl ca (one-time in certs/)
- *   touch index.txt
- *   echo 01 > serial
- *
- *   # Create CRL (validity chosen as example)
- *   openssl ca -gencrl -keyfile ca-key.pem -cert ca-cert.pem -out ca-crl.pem -crldays 30
- *
- *
- * ---------------------------------------------------------------------------
- * SECURITY RATIONALE & MANAGEMENT NOTES
- * ---------------------------------------------------------------------------
- *  - CA private key (ca-key.pem) must be protected and kept offline for real production.
- *  - SAN entries must match the SNI and the __ALLOWED_HOST__ used by clients.
- *  - Use ECDSA keys so server uses ECDHE-ECDSA suites; do NOT generate RSA keys.
- *  - SERVER REQUIRES (always): server-key.pem, server-cert.pem, ca-cert.pem
- *  - SECURITY_LEVEL >= 2: requires ca-crl.pem (revocation enforced at runtime).
- *  - mTLS=1: client-key.pem + client-cert.pem required for client-side authentication.
- *
+ * NEVER COPY:
+ *      ✘ ca-key.pem  (CA private key — extremely sensitive)
  * ============================================================================
  */
 
@@ -424,7 +853,7 @@ Rules enforced here:
 #endif
 
 /* ============================================================================
- * Auto-enable sanitizers in DEV (if not explicitly overridden)
+ * Auto-enable sanitisers in DEV (if not explicitly overridden)
  * ============================================================================
  */
 #if defined(__DEV__) && !defined(MODE_SAN)
@@ -435,7 +864,7 @@ Rules enforced here:
  * At this point:
  *   - Exactly one of: (__DEV__, __BENCH__, __PROD__) is logically active.
  *   - MODE_NAME is a human-readable string for logging / banners.
- *   - MODE_SAN may be used to gate sanitizer-specific logic if needed.
+ *   - MODE_SAN may be used to gate sanitiser-specific logic if needed.
  */
 
 /* ============================================================================
@@ -446,9 +875,9 @@ Rules enforced here:
  * If __LOG_ENABLE_DEBUG__ is set without __DEV__, this is a hard error.
  */
 
-//#if defined(__LOG_ENABLE_DEBUG__) && !defined(__DEV__)
-//#error "DEBUG logging is only allowed in __DEV__ builds. Remove __LOG_ENABLE_DEBUG__ or build with DEV=1."
-//#endif
+#if defined(__LOG_ENABLE_DEBUG__) && !defined(__DEV__)
+#error "DEBUG logging is only allowed in __DEV__ builds. Remove __LOG_ENABLE_DEBUG__ or build with DEV=1."
+#endif
 
 /* ============================================================================
  * Logging Helpers and Implementations
@@ -604,172 +1033,6 @@ print_runtime_security_banner(void)
 
 /**
 ===============================================================================
-@file   TCP_Server.c
-@brief  Hardened TLS Server (default) with Configurable Build Security Modes
-
-Default build behavior (when running plain "make"):
-
-    - PROD mode (hardened security, minimal logs).
-    - Mutual TLS enabled (mTLS=1, client certificate required).
-    - Strict HTTP Host enforcement using __ALLOWED_HOST__.
-    - TLS listener on TCP port 443 (standard HTTPS/TLS port).
-
-User-configurable build-time security modes and options:
-
-    - Security mode:
-        * PROD  (default, hardened deployment)
-        * DEV   (debugging and sanitizers)
-        * BENCH (performance benchmarking)
-
-    - TLS authentication:
-        * mTLS=1: mutual TLS (client certificate required)
-        * mTLS=0: server-auth TLS only (no client certificate requested)
-
-    - Logging visibility:
-        * WARN, INFO, DEBUG enabled/disabled via Make flags,
-          subject to strict per-mode policy (DEBUG forbidden in PROD/BENCH).
-
-The final server binary is fully user configurable at build time via the
-Makefile flags, with the default configuration being a hardened PROD TLS
-server with strict host enforcement.
-
--------------------------------------------------------------------------------
-Security Level (__SECURITY_LEVEL__)
--------------------------------------------------------------------------------
-
-The Makefile defines __SECURITY_LEVEL__ (integer macro) to control both
-authentication and revocation behaviour:
-
-    __SECURITY_LEVEL__ = 1
-        - mTLS only.
-        - CRL/OCSP disabled.
-        - Intended for DEV / CI builds only.
-
-    __SECURITY_LEVEL__ = 2
-        - Hardened baseline.
-        - CRL-based revocation checking enabled and required in PROD/BENCH.
-        - Server is expected to load and use CRLs for peer validation.
-
-    __SECURITY_LEVEL__ = 3
-        - Intended for CRL + OCSP in the future.
-        - OCSP support is NOT yet implemented in this server.
-        - In DEV builds: compilation emits a warning and runtime logs a warning.
-        - In PROD/BENCH builds: compilation fails (hardened builds must not
-          claim OCSP support until fully implemented and validated).
-
-===============================================================================
-BUILD MODES (MAKEFILE-CONTROLLED)
-===============================================================================
-
-Mode precedence (highest to lowest):
-
-    1) BENCH	-> BENCH mode
-    2) DEV    -> DEV mode
-    3) PROD		-> PROD mode (default)
-
-Effective compile-time state:
-
-    - DEV build:   __DEV__ is defined; __BENCH__ is not defined.
-    - BENCH build: __BENCH__ is defined; __DEV__ is not defined.
-    - PROD build:  neither __DEV__ nor __BENCH__ is defined (treated as PROD).
-
-TLS is ALWAYS enabled in all modes (no plain TCP).
-
--------------------------------------------------------------------------------
-mTLS selection (via Makefile)
--------------------------------------------------------------------------------
-
-    mTLS=1 (default):
-        - Mutual TLS (client certificate required).
-        - Server certificate is presented to the client.
-        - Client certificate must be presented and validated.
-        - Hostname verification uses TLS SNI / certificate SAN.
-        - Compile-time: __REQUIRE_MUTUAL_TLS__ defined.
-
-    mTLS=0:
-        - Server-auth TLS only (no client certificate requested).
-        - Server certificate is validated by the client.
-        - TLS encryption is still enforced; only mutual authentication is
-          disabled.
-        - Compile-time: __REQUIRE_MUTUAL_TLS__ not defined.
-
-All modes listen on TCP port 443 by default. Binding to port 443 normally
-requires starting as root and then dropping privileges.
-
--------------------------------------------------------------------------------
-Mode capabilities summary
--------------------------------------------------------------------------------
-
------+-------------------------+----------------------+----------------------------+-----------------------------+--------------------------
-Mode | TLS (0/1)               | Client Cert (mTLS=1) | Logging Allowed            | Host Enforcement            | Typical Use
------+-------------------------+----------------------+----------------------------+-----------------------------+--------------------------
-PROD | 1 (TLS always enforced) | Required when mTLS=1 | ERROR only                 | Strict reject on mismatch   | Hardened deployment
-DEV  | 0 or 1                  | Required when mTLS=1 | ERROR/WARN/INFO/DEBUG      | Warning only (no reject)    | Development and debugging
-BENCH| 1 (TLS always enforced) | Required when mTLS=1 | ERROR + optional WARN/INFO | Logged only, no reject      | Performance benchmarking
-
-============================================================================
-TLS AND MUTUAL TLS (mTLS) POLICY — FINAL CANONICAL DEFINITION
-============================================================================
-
-TLS — ALWAYS ON
-----------------
- - TLS is ALWAYS ENABLED in ALL build modes (PROD / BENCH / DEV).
- - Plain TCP / cleartext is strictly forbidden in all modes.
- - Build tools do NOT allow disabling TLS under any circumstance.
-
-
-Mutual TLS (client certificate authentication)
-----------------------------------------------
- - Default: ENABLED in ALL modes.
-
- - PROD mode:
-     * mTLS = ON is mandatory.
-     * Makefile blocks mTLS=0 builds.
-
- - BENCH mode:
-     * mTLS = ON is mandatory.
-     * Makefile blocks mTLS=0 builds.
-
- - DEV mode:
-     * mTLS can be turned OFF for local debugging or integration testing.
-     * When mTLS=0 (mTLS disabled):
-         - TLS encryption still enforced.
-         - No client certificate requested.
-         - CRL is optional.
-         - Host mismatch logs WARNING but request is allowed.
-
-
-Security rationale
-------------------
- - mTLS required for hardened deployments → strict client identity validation.
- - Developer iteration must be frictionless → allow mTLS OFF temporarily.
-
-
-Summary Matrix
---------------
-  Mode   | TLS | mTLS (mTLS=1 required?) | Policy
-  -------+-----+-------------------------+------------------------------------
-  PROD   | ON  | ALWAYS ON               | Hardened deployment — fail closed
-  BENCH  | ON  | ALWAYS ON               | Performance measurement — hardened
-  DEV    | ON  | ON (default) or OFF     | Debug mode — fail open allowed
-
-
-Enforcement
------------
- - Makefile prevents invalid builds:
-     PROD/BENCH + mTLS=0 → build error
-     DEBUG logging without DEV → build error
-
- - C code enforces:
-     * SSL_CTX_verify behavior by mTLS=1 vs mTLS=0 <<== #FixThis: ??
-     * Host mismatch: reject in PROD/BENCH, warn-only in DEV
-     * Revocation required in PROD/BENCH only
-
-============================================================================
-*/
-
-/**
-===============================================================================
 LOGGING ENFORCEMENT BY MODE
 ===============================================================================
 
@@ -801,49 +1064,42 @@ Hard denials:
       error is raised by this file.
 
 ===============================================================================
-VALID MAKE COMMANDS (TOTAL 34 SUPPORTED COMBINATIONS)
+VALID MAKE COMMANDS
 ===============================================================================
 
 PROD builds (PROD, DEBUG not allowed):
 
-    make PROD TLS=1
-    make PROD TLS=0
-    make PROD TLS=1 WARN=1
-    make PROD TLS=1 INFO=1
-    make PROD TLS=1 WARN=1 INFO=1
-    make PROD TLS=0 WARN=1
-    make PROD TLS=0 INFO=1
-    make PROD TLS=0 WARN=1 INFO=1
+    make PROD mTLS=1
+    make PROD mTLS=0
+    make PROD mTLS=1 WARN=1
+    make PROD mTLS=1 INFO=1
+    make PROD mTLS=1 WARN=1 INFO=1
 
 DEV builds (DEV, all logging flags allowed):
 
-    make DEV TLS=1
-    make DEV TLS=0
-    make DEV TLS=1 WARN=1
-    make DEV TLS=0 WARN=1
-    make DEV TLS=1 INFO=1
-    make DEV TLS=0 INFO=1
-    make DEV TLS=1 WARN=1 INFO=1
-    make DEV TLS=0 WARN=1 INFO=1
-    make DEV TLS=1 DEBUG=1
-    make DEV TLS=0 DEBUG=1
-    make DEV TLS=1 WARN=1 DEBUG=1
-    make DEV TLS=0 WARN=1 DEBUG=1
-    make DEV TLS=1 INFO=1 DEBUG=1
-    make DEV TLS=0 INFO=1 DEBUG=1
-    make DEV TLS=1 WARN=1 INFO=1 DEBUG=1
-    make DEV TLS=0 WARN=1 INFO=1 DEBUG=1
+    make DEV mTLS=1
+    make DEV mTLS=0
+    make DEV mTLS=1 WARN=1
+    make DEV mTLS=0 WARN=1
+    make DEV mTLS=1 INFO=1
+    make DEV mTLS=0 INFO=1
+    make DEV mTLS=1 WARN=1 INFO=1
+    make DEV mTLS=0 WARN=1 INFO=1
+    make DEV mTLS=1 DEBUG=1
+    make DEV mTLS=0 DEBUG=1
+    make DEV mTLS=1 WARN=1 DEBUG=1
+    make DEV mTLS=0 WARN=1 DEBUG=1
+    make DEV mTLS=1 INFO=1 DEBUG=1
+    make DEV mTLS=0 INFO=1 DEBUG=1
+    make DEV mTLS=1 WARN=1 INFO=1 DEBUG=1
+    make DEV mTLS=0 WARN=1 INFO=1 DEBUG=1
 
 BENCH builds (BENCH, DEBUG not allowed):
 
-    make BENCH TLS=1
-    make BENCH TLS=0
-    make BENCH TLS=1 WARN=1
-    make BENCH TLS=0 WARN=1
-    make BENCH TLS=1 INFO=1
-    make BENCH TLS=0 INFO=1
-    make BENCH TLS=1 WARN=1 INFO=1
-    make BENCH TLS=0 WARN=1 INFO=1
+    make BENCH mTLS=1
+    make BENCH mTLS=1 WARN=1
+    make BENCH mTLS=1 INFO=1
+    make BENCH mTLS=1 WARN=1 INFO=1
 
 Any other combination of PROD / BENCH / mTLS / WARN / INFO / DEBUG
 is considered invalid and should fail at Makefile or compile time.
@@ -954,7 +1210,7 @@ Security note:
 -------------------------------------------------------------------------------
 
 Configuration:
-    DEV mode: mutual TLS, WARN + INFO + DEBUG logs are disable.
+    DEV mode: mutual TLS, WARN + INFO + DEBUG logs are disabled.
 
 Make command:
 
@@ -980,11 +1236,11 @@ Why equivalent:
 
     - DEV maps to __DEV__ (DEV mode).
     - mTLS=1 maps to __REQUIRE_MUTUAL_TLS__.
-    - DEV builds enable sanitizers and debug information.
+    - DEV builds enable sanitisers and debug information.
 
 Security note:
 
-    - DEV builds are not hardened for production (sanitizers, no chroot, no
+    - DEV builds are not hardened for production (sanitisers, no chroot, no
       privilege drop).
     - Intended only for development and debugging.
 
@@ -1017,7 +1273,7 @@ Why equivalent:
     - DEV mode is selected with __DEV__.
     - No __REQUIRE_MUTUAL_TLS__ means mTLS=0 (still encrypted, no client certs).
     - DEBUG=1 maps to __LOG_ENABLE_DEBUG__.
-    - Sanitizers and debug info reflect DEV mode.
+    - Sanitisers and debug info reflect DEV mode.
 
 Security note:
 
@@ -1135,7 +1391,7 @@ Approximate gcc:
 
 Minimal BENCH, mutual TLS, no extra logs:
 
-    make BENCH TLS=1
+    make BENCH mTLS=1
 
 Approximate gcc:
 
@@ -1172,7 +1428,7 @@ and then:
     DEV   build  -> __ALLOWED_HOST__ = $(DEV_HOST)
     BENCH build  -> __ALLOWED_HOST__ = $(BENCH_HOST)
 
-Runtime behavior:
+Runtime behaviour:
 
     PROD  builds:
         - HTTP "Host" header must match __ALLOWED_HOST__ exactly.
@@ -1205,7 +1461,7 @@ Notes:
     - Use the ECDSA private keys generated above (prime256v1).
     - s_client will negotiate ECDHE-ECDSA suites automatically when server
       and CA/certs are ECDSA-capable.
-    - Use -tls1_3 to force TLS1.3 (if testing 1.3 behavior), or omit to let
+    - Use -tls1_3 to force TLS1.3 (if testing 1.3 behaviour), or omit to let
       OpenSSL select the best supported protocol.
 
 DEV mode, mTLS=1 (mutual TLS, all logs enabled):
@@ -1300,223 +1556,8 @@ Sandboxing (PROD and BENCH):
 DEV builds:
 
     - No chroot or privilege drop is used (to simplify debugging).
-    - Sanitizers are enabled via Makefile flags (ASan, UBSan).
+    - Sanitisers are enabled via Makefile flags (ASan, UBSan).
 
-*/
-
-/**
-===============================================================================
-SYSTEM PREREQUISITES AND WHY THEY ARE REQUIRED
-===============================================================================
-
-Compiler requirements:
-
-    Minimum required:
-        - GCC 13 and g++ 13 or newer.
-
-    Recommended:
-        - Install the latest stable GCC and g++ versions available in your
-          distribution repositories (for example: GCC 15 and g++ 15 if
-          available).
-
-    Rule:
-        - Choose a single GCC major version V >= 13 (for example 13 or 15)
-          and use that same V consistently in all commands below:
-              gcc-V, g++-V, /usr/bin/gcc-V, /usr/bin/g++-V.
-
-    Reason:
-        - This project uses C23 features and modern security hardening flags.
-          Earlier compilers (such as GCC 11 or below, commonly installed by
-          default in many systems) will fail during compilation or lack
-          required diagnostics.
-
-Check current GCC version:
-
-    gcc --version
-
-If gcc < 13, upgrade toolchain as follows. In all commands below, replace
-"<V>" with the major version you are installing (for example 13 or 15).
-
-Step 1: enable access to recent toolchains:
-
-    sudo apt install software-properties-common
-    sudo add-apt-repository ppa:ubuntu-toolchain-r/test
-    sudo apt update
-
-    software-properties-common:
-        - Provides add-apt-repository utility.
-    add-apt-repository / apt update:
-        - Enable and refresh the toolchain PPA for newer GCC.
-
-Step 2: install compilers and essential build tools (using your chosen <V>):
-
-    sudo apt install gcc-<V> g++-<V>
-    sudo apt install build-essential apt-file openssl libssl-dev
-    sudo apt-file update
-
-    gcc-<V>, g++-<V>:
-        - Required compilers (C23 features used in this project).
-        - Examples:
-            * Minimum: gcc-13 g++-13
-            * Newer:   gcc-15 g++-15 (if available on your system)
-    build-essential:
-        - Installs make, linker, and C runtime headers.
-    apt-file, apt-file update:
-        - Allows searching which package provides a missing header/library.
-    openssl:
-        - Provides openssl CLI tools (including s_client) for testing.
-    libssl-dev:
-        - Provides OpenSSL headers and libraries required for compilation.
-
-Step 3: select GCC <V> as the default compiler:
-
-    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-<V> 100
-    sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-<V> 100
-    sudo update-alternatives --config gcc
-
-    update-alternatives:
-        - Ensures gcc and g++ invoke the chosen GCC version <V> by default.
-        - Use the same <V> here that you installed in the previous step.
-
-Examples:
-
-    Minimum supported (V=13):
-
-        sudo apt install gcc-13 g++-13
-        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100
-        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100
-
-    Newer toolchain (V=15, if available):
-
-        sudo apt install gcc-15 g++-15
-        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 100
-        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-15 100
-
-
-Optional: JSON audit utility (recommended for CI/test environments)
-
-    sudo apt install jq
-
-    jq:
-        - Used by test_builds.sh to merge per-build JSON results into
-          summary.json for audit and compliance visibility.
-        - If jq is not installed, test_builds.sh will still run using a
-          minimal JSON summary (no runtime dependency in the server).
-
-Optional: build a recent OpenSSL from source if system OpenSSL is too old:
-
-    mkdir ~/openssl_3_5
-    cd ~/openssl_3_5
-    wget https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz
-    tar xzvf openssl-3.5.4.tar.gz
-    cd openssl-3.5.4
-    ./config
-    make
-    sudo make install
-    openssl version -a
-
-Purpose:
-
-    - Guarantees a recent OpenSSL 3.x version with modern TLS 1.3 support.
-    - Avoids limitation of older distributions with outdated libssl.
-
-Troubleshooting system packages:
-
-    sudo apt list --upgradable
-    sudo apt full-upgrade
-
-    - Use these to bring system packages up to date.
-
-If apt repeatedly warns about snapd:
-
-    sudo apt-get --simulate install snapd
-    sudo apt-get install snapd
-
-    - These clear pending snapd-related upgrade warnings, if present.
-    - They do not affect the TLS server itself but keep the package manager
-      in a consistent state.
-
-Summary of installed packages and commands:
-
-    software-properties-common   -> Needed for add-apt-repository
-    add-apt-repository           -> Adds toolchain PPA for GCC upgrades
-    apt update                   -> Refreshes package index
-    gcc-<V>, g++-<V> (V >= 13)   -> Required compilers for C23 code
-    build-essential              -> Core build toolkit (make, ld, headers)
-    apt-file, apt-file update    -> Helps locate missing headers/libraries
-    openssl, libssl-dev          -> Runtime and development support for TLS
-    jq (optional)                -> JSON compliance audit reports for CI
-    update-alternatives ...      -> Switches system to chosen GCC <V> by default
-    make / sudo make install     -> Builds and installs OpenSSL from source
-    openssl version -a           -> Verifies installed OpenSSL version
-    apt list / full-upgrade      -> Resolves outdated or missing packages
-    apt-get ... snapd            -> Cleans up snapd warnings if necessary
-
-*/
-
-/**
-===============================================================================
-DIRECT GCC BUILD (DEVELOPER ONLY, NOT HARDENED)
-===============================================================================
-
-The recommended way to build is via the Makefile, using one of the 34 valid
-make commands described above. Direct gcc commands should only be used for
-quick local tests.
-
-1) Simple functional test (no extra hardening):
-
-    gcc TCP_Server.c -o TCP_Server -lssl -lcrypto
-
-2) Closer to PROD-style warnings and optimisation:
-
-    gcc -std=c2x TCP_Server.c -o TCP_Server \
-        -Wall -Wextra -Werror -Wpedantic \
-        -Wformat=2 -Wshadow -Wpointer-arith \
-        -Wcast-align -Wwrite-strings -Wconversion \
-        -O2 \
-        -lssl -lcrypto
-
-These direct builds:
-
-    - Do NOT apply the full hardening that the Makefile adds.
-    - Do NOT enforce the same mode, logging, and host policies automatically.
-    - Should NOT be used for hardened deployment.
-
-For real deployments or benchmarks, always use the Makefile with a valid
-(PROD / DEV / BENCH, mTLS, and logging) combination.
-
-===============================================================================
-@section security_compliance Security Compliance Summary (S16)
-===============================================================================
-
-This software is designed for hardened operational deployment only when built
-using the Makefile in a valid PROD or BENCH configuration with:
-
-		- TLS encryption always enabled, and
-		- Mutual TLS (TLS=1) enforced by policy in PROD/BENCH.
-
-These Makefile builds apply:
-
-    - Full compiler and linker security hardening flags,
-    - Denial of DEBUG logging in production and benchmarking modes,
-    - Strict or logged HTTP Host enforcement, and
-    - Chroot and privilege drop requirements (PROD/BENCH only).
-
-DEBUG logging, unrestricted host acceptance, or the absence of privilege and
-filesystem isolation significantly reduces security posture. Therefore:
-
-    - Any build that enables DEBUG logging outside of DEV mode, or
-    - Any binary produced outside of Makefile enforcement,
-
-shall not be deployed or executed in an operational or production environment.
-
-DEV builds are permitted solely for development and troubleshooting and are not
-authorized for deployment. All production or benchmark usage must use a valid
-Makefile-controlled hardened build that meets the requirements above.
-
-===============================================================================
-END OF BUILD / TEST / SECURITY / SYSTEM REQUIREMENTS DOCUMENTATION
-===============================================================================
 */
 
 /* ============================================================================
@@ -1560,7 +1601,7 @@ static void SignalHandler_SetExitFlag(int signum)
  * ============================================================================
  *
  * In MODE_SAN builds, we aggressively abort the process on unexpected OpenSSL
- * errors to surface issues under sanitizers as early as possible.
+ * errors to surface issues under sanitisers as early as possible.
 **/
 static void rvSanAbortOnOpenSSLError(const char* where, int ssl_err)
 {
