@@ -147,7 +147,10 @@ Development builds (`PROD=0`) enable compiler sanitizers for memory safety and u
 
 ## CI Status
 
+The scripts generating the CI need update as commands passed to make file are updated but scripts are using old / obsolete commands. Will fix the build files shortly.
+<!--
 [![Build Validation](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/build-validation.yml/badge.svg)](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/build-validation.yml)
 [![Hardened PROD Build](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/hardened-prod.yml/badge.svg)](https://github.com/rxa1031/TCP_Server_with_ECDSA/actions/workflows/hardened-prod.yml)
+-->
 
 High-assurance mutual-TLS server implementation with Defence-grade build enforcement.
