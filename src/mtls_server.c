@@ -11,13 +11,13 @@
 
 /**
 ===============================================================================
-@file   TCP_Server.c
+@file   mtls_server.c
 @brief  Hardened TLS Server (default) with Configurable Build Security Modes
 
 Default build behaviour (when running plain "make"):
 
     - PROD mode (hardened security, minimal logs).
-    - Mutual TLS enabled (mTLS=1, client certificate required).
+    - Mutual TLS enabled (__REQUIRE_MUTUAL_TLS__ is defined, client certificate is required).
     - Strict HTTP Host enforcement using __ALLOWED_HOST__.
     - TLS listener on TCP port 443 (standard HTTPS/TLS port).
 
@@ -47,28 +47,29 @@ Security Level (__SECURITY_LEVEL__)
 The Makefile defines __SECURITY_LEVEL__ (integer macro) to control both
 authentication and revocation behaviour:
 
-    __SECURITY_LEVEL__ = 1
-        - mTLS only.
-        - CRL/OCSP disabled.
-        - Intended for DEV / CI builds only.
+	__SECURITY_LEVEL__ = 1
+		- TLS only (baseline security).
+		- mTLS OPTIONAL and allowed ONLY in DEV builds.
+		- CRL / OCSP disabled.
+		- PROD / BENCH builds at this level are EXPECTED TO FAIL.
 
-    __SECURITY_LEVEL__ = 2
-        - Hardened baseline.
-        - CRL-based revocation checking enabled and required in PROD/BENCH.
-        - Server is expected to load and use CRLs for peer validation.
+	__SECURITY_LEVEL__ = 2
+		- Hardened baseline.
+		- CRL-based revocation checking enabled and required in PROD/BENCH.
+		- Server is expected to load and use CRLs for peer validation.
 
-    __SECURITY_LEVEL__ = 3
-        - Intended for CRL + OCSP in the future.
-        - OCSP support is NOT yet implemented in this server.
-        - In DEV builds: compilation emits a warning and runtime logs a warning.
-        - In PROD/BENCH builds: compilation fails (hardened builds must not
-          claim OCSP support until fully implemented and validated).
+	__SECURITY_LEVEL__ = 3
+		- Intended for CRL + OCSP in the future.
+		- OCSP support is NOT yet implemented in this server.
+		- In DEV builds: compilation emits a warning and runtime logs a warning.
+		- In PROD/BENCH builds: compilation fails (hardened builds must not
+		  claim OCSP support until fully implemented and validated).
 
 ===============================================================================
 BUILD MODES (MAKEFILE-CONTROLLED)
 ===============================================================================
 
-Mode selection rules (mutually exclusive, invalid combinations rejected)
+Mode selection rules (mutually exclusive; invalid combinations are rejected)
 Any build that defines more than one mode macro (__DEV__, __BENCH__)
 or violates policy constraints (for example, mTLS=0 in PROD/BENCH)
 is rejected at Makefile or compile time.
@@ -110,12 +111,18 @@ requires starting as root and then dropping privileges.
 Mode capabilities summary
 -------------------------------------------------------------------------------
 
------+------+----------------------+----------------------------+-----------------------------+--------------------------
-Mode | mTLS | Client Cert (mTLS=1) | Logging Allowed            | Host Enforcement            | Typical Use
------+------+----------------------+----------------------------+-----------------------------+--------------------------
-PROD | 1    | Required when mTLS=1 | ERROR only                 | Strict reject on mismatch   | Hardened deployment
-DEV  | 1    | Required when mTLS=1 | ERROR/WARN/INFO/DEBUG      | Warning only (no reject)    | Development and debugging
-BENCH| 1    | Required when mTLS=1 | ERROR + optional WARN/INFO | Logged only, no reject      | Performance benchmarking
+-----+------+--------------------------+----------------------------+-----------------------------+--------------------------
+Mode | mTLS | Client Cert (via mTLS)   | Logging Allowed            | Host Enforcement            | Typical Use
+-----+------+--------------------------+----------------------------+-----------------------------+--------------------------
+PROD | 1    | Required (always mTLS=1) | ERROR only                 | Strict reject on mismatch   | Hardened deployment
+DEV  | Conf | Configurable             | ERROR/WARN/INFO/DEBUG      | Warning only (no reject)    | Development and debugging
+BENCH| 1    | Required (always mTLS=1) | ERROR + optional WARN/INFO | Logged only, no reject      | Performance benchmarking
+
+  * Conf = Configurable
+
+NOTE:
+    This source file enforces policy, not enumeration.
+    Later sections MUST NOT redefine or extend it.
 
 ============================================================================
 TLS AND MUTUAL TLS (mTLS) POLICY — FINAL CANONICAL DEFINITION
@@ -145,7 +152,7 @@ Mutual TLS (client certificate authentication)
      * When mTLS=0 (mTLS disabled):
          - TLS encryption still enforced.
          - No client certificate requested.
-         - CRL is optional.
+         - CRL is not used when __SECURITY_LEVEL__ == 1.
          - Host mismatch logs WARNING but request is allowed.
 
 
@@ -175,27 +182,191 @@ Enforcement
          - mTLS=1 (__REQUIRE_MUTUAL_TLS__ defined):
              SSL_CTX_set_verify(ctx,
                  SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
-      
+
              Effect:
                  • Client certificate is REQUIRED
                  • Certificate chain is verified against CA
-                 • CRL enforcement applies when SECURITY_LEVEL >= 2
+                 • CRL enforcement applies when __SECURITY_LEVEL__ >= 2
                  • Handshake fails if client cert is missing or invalid
-      
+
          - mTLS=0 (__REQUIRE_MUTUAL_TLS__ not defined):
              SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
-      
+
              Effect:
                  • Client certificate is NOT requested
                  • TLS encryption remains enforced
                  • Server certificate is still presented and authenticated
-      
+
        This behaviour is intentional and compliant with standard OpenSSL
        server-auth vs mutual-auth TLS models.
      * Host mismatch: reject in PROD/BENCH, warn-only in DEV
      * Revocation required in PROD/BENCH only
 
 ============================================================================
+*/
+
+/* ============================================================================
+ * Hardened TLS / mTLS Cryptographic Requirements
+ * ============================================================================
+ *
+ *
+ * IMPLEMENTATION NOTE:
+ * This section does not define new policy.
+ * It restates cryptographic and OpenSSL-specific requirements derived from
+ * the canonical TLS/mTLS policy above, and exists for implementation clarity.
+ *
+ * TLS is ALWAYS enabled in ALL build modes. Plain TCP is never permitted.
+ *
+ * Mutual TLS requirement (controlled by Makefile TLS flag):
+ *
+ *   Mode   | mTLS Required? | Comments
+ *   -------+----------------+-----------------------------------------------
+ *   PROD   | YES            | Hardened deployment — fail-closed
+ *   BENCH  | YES            | Performance test — hardened trust behaviour
+ *   DEV    | OPTIONAL       | Developer convenience
+ *                            Enable mTLS explicitly:
+ *                              make DEV mTLS=1
+ *                            or disable mTLS:
+ *                              make DEV mTLS=0
+ *
+ * ---------------------------------------------------------------------------
+ * Security Level Enforcement (__SECURITY_LEVEL__)
+ * ---------------------------------------------------------------------------
+ *
+ * Security Level is passed from the Makefile as:
+ *
+ *   -D__SECURITY_LEVEL__=<1|2|3>
+ *
+ * Mapping:
+ *
+ *   __SECURITY_LEVEL__ = 1
+ *        - TLS only
+ *        - mTLS optional (DEV only)
+ *        - No CRL / no OCSP
+ *
+ *   __SECURITY_LEVEL__ = 2  → Hardened baseline (mTLS + CRL)
+ *        - TLS always ON
+ *        - mTLS REQUIRED in PROD/BENCH
+ *        - CRL REQUIRED (revocation enforced via CRL)
+ *        - OCSP not used (reserved)
+ *
+ *   __SECURITY_LEVEL__ = 3  → Future hardened mode (mTLS + CRL + OCSP)
+ *        - TLS always ON
+ *        - OCSP NOT IMPLEMENTED in this server
+ *        - Allowed only in DEV builds
+ *        - PROD/BENCH builds must reject __SECURITY_LEVEL__ >= 3
+ *
+ * CRL must exist in hardened builds when __SECURITY_LEVEL__ >= 2.
+ * In DEV, default security level is __SECURITY_LEVEL__ = 1, unless set
+ * explicitly to a higher value. Thus CRL is not used when
+ * __SECURITY_LEVEL__ == 1; failure to configure it only logs a warning
+ * in DEV builds.
+ * NOTE: “Not used” means the artefact is neither loaded nor consulted at runtime.
+ */
+
+/* ============================================================================
+ *                    CERTIFICATE CHAIN — VISUAL TRUST FLOW
+ * ============================================================================
+ *
+ *                             (Root of Trust)
+ *                            ┌────────────────┐
+ *                            │   ca-key.pem   │  ← CA PRIVATE KEY
+ *                            │(never shipped) │
+ *                            └───────▲────────┘
+ *                                    │ signs
+ *                                    │
+ *                            ┌────────────────┐
+ *                            │  ca-cert.pem   │  ← CA CERTIFICATE (public)
+ *                            └───────┬────────┘
+ *                                    │
+ *     ┌──────────────────────────────┼──────────────────────────────┐
+ *     │                              │                              │
+ *     ▼                              ▼                              ▼
+ *
+ *  SERVER CERT PATH           CLIENT CERT PATH                 CRL PATH
+ *  ------------------         ------------------               -------------
+ *
+ *   server-key.pem             client-key.pem                  ca-crl.pem
+ *   server.csr                 client.csr                      (revocations)
+ *        │                          │
+ *        └──── signed by CA ────────┘
+ *
+ *   server-cert.pem            client-cert.pem
+ *
+ * ============================================================================
+ * RUNTIME REQUIREMENTS
+ * ============================================================================
+ *
+ * SERVER must have:
+ *      ✔ server-key.pem
+ *      ✔ server-cert.pem
+ *      ✔ ca-cert.pem
+ *      ✔ ca-crl.pem           (required when __SECURITY_LEVEL__ ≥ 2)
+ *
+ * CLIENT (mTLS only) must have:
+ *      ✔ client-key.pem
+ *      ✔ client-cert.pem
+ *      ✔ ca-cert.pem
+ *
+ * NEVER COPY:
+ *      ✘ ca-key.pem  (CA private key — extremely sensitive)
+ * ============================================================================
+ */
+
+/**
+===============================================================================
+BUILD MODE SUMMARY
+===============================================================================
+
+Mode   Purpose                 mTLS          Default Security Level  Default Logging              Running Privileges
+-----  ----------------------  ------------  ----------------------  ------------------------     ----------------------------------------------
+PROD   Hardened deployment     Required      2                       ERROR only                   Must start as root → chroot + drop to svc_mtls_server
+BENCH  Performance testing     Required      2                       ERROR only                   Must start as root → chroot + drop to svc_mtls_server
+DEV    Debug + development     Configurable  1                       ERROR + WARN + INFO + DEBUG  No chroot; sanitisers enabled
+
+Notes:
+  - TLS encryption is ALWAYS ON in all modes; plaintext TCP is forbidden.
+  - Only authentication enforcement and logging visibility change by mode.
+  - Defaults shown above may be further restricted by Makefile policy.
+===============================================================================
+*/
+
+/**
+===============================================================================
+RUNTIME SANDBOXING AND PRIVILEGE MODEL
+===============================================================================
+
+PROD and BENCH builds:
+
+    - The server is expected to start with sufficient privileges to:
+        * bind to TCP port 443,
+        * enter a restricted filesystem namespace (chroot),
+        * drop privileges to an unprivileged service account.
+
+    - Typical hardened deployment sequence:
+        1) Start as root.
+        2) chroot into a restricted directory
+           (for example: /var/secure-mtls-server).
+        3) Drop privileges to a dedicated unprivileged user
+           (for example: svc_mtls_server).
+
+    - Certificate and key files must be available inside the chroot and
+      protected with strict permissions (for example: owned by root with
+      no world access).
+
+DEV builds:
+
+    - No chroot or privilege drop is performed to simplify debugging.
+    - The server may be run entirely as an unprivileged user.
+    - Sanitisers (ASan, UBSan) are typically enabled via Makefile flags.
+
+Rationale:
+
+    - Privilege separation and filesystem isolation reduce the blast radius
+      of vulnerabilities in hardened (PROD/BENCH) deployments.
+    - DEV builds prioritise developer velocity over isolation.
+
+===============================================================================
 */
 
 /**
@@ -447,7 +618,7 @@ Summary of installed packages and commands:
  *   rm -f client.csr
  *
  *
- * 4) Certificate Revocation List (required in PROD/BENCH or SECURITY_LEVEL>=2)
+ * 4) Certificate Revocation List (required in PROD/BENCH or __SECURITY_LEVEL__>=2)
  * ----------------------------------------------------------------------------
  *   # Initialise CA db for openssl ca (one-time in certs/)
  *   touch index.txt
@@ -464,44 +635,13 @@ Summary of installed packages and commands:
  *  - SAN entries must match the SNI and the __ALLOWED_HOST__ used by clients.
  *  - Use ECDSA keys so server uses ECDHE-ECDSA suites; do NOT generate RSA keys.
  *  - SERVER REQUIRES (always): server-key.pem, server-cert.pem, ca-cert.pem
- *  - SECURITY_LEVEL >= 2: requires ca-crl.pem (revocation enforced at runtime).
+ *  - __SECURITY_LEVEL__ >= 2: requires ca-crl.pem (revocation enforced at runtime).
  *  - mTLS=1: client-key.pem + client-cert.pem required for client-side authentication.
  *
  * ============================================================================
  */
 
-/**
-===============================================================================
-DIRECT GCC BUILD (DEVELOPER ONLY, NOT HARDENED)
-===============================================================================
-
-The recommended way to build is via the Makefile, using one of the 34 valid
-make commands described above. Direct gcc commands should only be used for
-quick local tests. These commands bypass Makefile policy checks and are not
-policy-complete.
-
-1) Simple functional test (no extra hardening):
-
-    gcc TCP_Server.c -o TCP_Server -lssl -lcrypto
-
-2) Closer to PROD-style warnings and optimisation:
-
-    gcc -std=c2x TCP_Server.c -o TCP_Server \
-        -Wall -Wextra -Werror -Wpedantic \
-        -Wformat=2 -Wshadow -Wpointer-arith \
-        -Wcast-align -Wwrite-strings -Wconversion \
-        -O2 \
-        -lssl -lcrypto
-
-These direct builds:
-
-    - Do NOT apply the full hardening that the Makefile adds.
-    - Do NOT enforce the same mode, logging, and host policies automatically.
-    - Should NOT be used for hardened deployment.
-
-For real deployments or benchmarks, always use the Makefile with a valid
-(PROD / DEV / BENCH, mTLS, and logging) combination.
-
+/*
 ===============================================================================
 @section security_compliance Security Compliance Summary (S16)
 ===============================================================================
@@ -536,6 +676,147 @@ END OF BUILD / TEST / SECURITY / SYSTEM REQUIREMENTS DOCUMENTATION
 ===============================================================================
 */
 
+/*
+===============================================================================
+WARNING:
+    These commands intentionally bypass build-time policy validation.
+
+CONSOLIDATED MANUAL GCC AND OPENSSL COMMANDS (REFERENCE ONLY)
+===============================================================================
+
+This section consolidates all gcc and OpenSSL commands that were previously
+scattered across this file.
+
+IMPORTANT
+---------
+- These commands are assumed to be run manually by the user.
+- They bypass Makefile policy enforcement.
+- Redundant variants have been removed.
+- NO validation or correction has been applied yet.
+- Commands may contain bugs, deprecated flags, or illegal combinations.
+- This block exists purely as a reference baseline for later cleanup.
+- These commands may violate the canonical 144-command build matrix and are
+  NOT suitable for compliance, CI, or deployment validation.
+
+-------------------------------------------------------------------------------
+GCC BUILD COMMANDS (MANUAL INVOCATION)
+-------------------------------------------------------------------------------
+
+[1] Minimal functional build (no hardening)
+
+    gcc mtls_server.c -o TCP_Server -lssl -lcrypto
+
+
+[2] Generic optimised build with warnings
+
+    gcc -std=c2x mtls_server.c -o TCP_Server \
+        -Wall -Wextra -Werror -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -O2 \
+        -lssl -lcrypto
+
+
+[3] PROD-style manual build
+    (mTLS enabled, WARN + INFO logging — policy-bypassing example)
+
+    gcc mtls_server.c -o TCP_Server \
+        -D__REQUIRE_MUTUAL_TLS__ \
+        -D__ALLOWED_HOST__=\"secure.lab.linux\" \
+        -D__LOG_ENABLE_WARN__ \
+        -D__LOG_ENABLE_INFO__ \
+        -std=c2x \
+        -Wall -Wextra -Werror -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -O2 \
+        -lssl -lcrypto
+
+
+[4] DEV-style manual build
+    (mTLS enabled, DEBUG logging, sanitisers)
+
+    gcc mtls_server.c -o TCP_Server \
+        -D__DEV__ \
+        -D__REQUIRE_MUTUAL_TLS__ \
+        -D__LOG_ENABLE_WARN__ \
+        -D__LOG_ENABLE_INFO__ \
+        -D__LOG_ENABLE_DEBUG__ \
+        -std=c2x \
+        -g3 -O0 \
+        -fsanitize=address,undefined \
+        -Wall -Wextra -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -lssl -lcrypto
+
+
+[5] DEV-style manual build
+    (server-auth only, DEBUG logging)
+
+    gcc mtls_server.c -o TCP_Server \
+        -D__DEV__ \
+        -D__LOG_ENABLE_DEBUG__ \
+        -std=c2x \
+        -g3 -O0 \
+        -fsanitize=address,undefined \
+        -Wall -Wextra -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -lssl -lcrypto
+
+
+[6] BENCH-style manual build
+    (mTLS enabled, INFO logging)
+
+    gcc mtls_server.c -o TCP_Server \
+        -D__BENCH__ \
+        -D__REQUIRE_MUTUAL_TLS__ \
+        -D__ALLOWED_HOST__=\"127.0.0.1\" \
+        -D__LOG_ENABLE_INFO__ \
+        -std=c2x \
+        -O2 \
+        -Wall -Wextra -Wpedantic \
+        -Wformat=2 -Wshadow -Wpointer-arith \
+        -Wcast-align -Wwrite-strings -Wconversion \
+        -lssl -lcrypto
+
+
+-------------------------------------------------------------------------------
+OPENSSL TLS CLIENT COMMANDS (MANUAL TESTING)
+-------------------------------------------------------------------------------
+
+[7] DEV-style TLS client (mTLS enabled)
+
+    openssl s_client -connect 127.0.0.1:443 \
+        -servername localhost \
+        -cert client-cert.pem -key client-key.pem \
+        -CAfile ca-cert.pem
+
+
+[8] PROD-style TLS client (mTLS enabled)
+
+    printf \"GET / HTTP/1.1\\r\\nHost: secure.lab.linux\\r\\nConnection: close\\r\\n\\r\\n\" | \
+    openssl s_client -connect secure.lab.linux:443 \
+        -servername secure.lab.linux \
+        -CAfile ./certs/ca-cert.pem \
+        -cert ./certs/client-cert.pem \
+        -key ./certs/client-key.pem
+
+
+[9] BENCH-style TLS client (mTLS enabled)
+
+    openssl s_client \
+        -connect 127.0.0.1:443 \
+        -cert certs/client-cert.pem \
+        -key certs/client-key.pem \
+        -CAfile certs/ca-cert.pem
+
+-------------------------------------------------------------------------------
+END OF CONSOLIDATED MANUAL COMMAND BLOCK
+-------------------------------------------------------------------------------
+*/
+
 #if !defined( _DEFAULT_SOURCE )
 #define _DEFAULT_SOURCE     /* request GNU extensions */
 #endif // of !defined( _DEFAULT_SOURCE )
@@ -567,14 +848,23 @@ END OF BUILD / TEST / SECURITY / SYSTEM REQUIREMENTS DOCUMENTATION
 #include <sys/socket.h>   /* Required for socket functions like socket(), connect(), etc. */
 #include <sys/stat.h>     /* For jail directory permissions etc. */
 #include <arpa/inet.h>    /* sockaddr conversions, AF_INET, AF_INET6, inet_pton() */
-#include <netdb.h>				/* NI_MAXHOST, NI_MAXSERV and getnameinfo() */
-//	#include <netinet/in.h>
+#include <netdb.h>        /* NI_MAXHOST, NI_MAXSERV and getnameinfo() */
+//#include <netinet/in.h>
 #include <netinet/tcp.h>
 
 /* ==== OpenSSL ==== */
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/x509v3.h>
+
+static SSL_CTX* ctx = (SSL_CTX*)NULL;
+static SSL* ssl = (SSL*)NULL;
+static struct addrinfo* server = (struct addrinfo*)NULL;
+static int iSocketFieldDescription = -1;
+static int iAcceptedClientFileDescriptor = -1;
+
+static volatile sig_atomic_t g_exit_requested = 0;
+static volatile sig_atomic_t g_last_signal = 0;
 
 /* ============================================================================
  * Compile-time TLS port and certificate paths (runtime-relative)
@@ -632,7 +922,6 @@ END OF BUILD / TEST / SECURITY / SYSTEM REQUIREMENTS DOCUMENTATION
 #define CA_CERT_NAME           __CA_CERT_NAME__
 #define CA_CRL_NAME            __CA_CRL_NAME__
 
-
 /*
 ===============================================================================
 BUILD CONFIGURATION, MODE SELECTION, AND LOGGING
@@ -686,7 +975,7 @@ Any build that defines both __DEV__ and __BENCH__ at the same time is invalid.
 Mutual TLS Feature Selection (__REQUIRE_MUTUAL_TLS__)
 -------------------------------------------------------------------------------
 
-		- mTLS is abbreviation for Mutual TLS
+        - mTLS is abbreviation for Mutual TLS
 
     - If __REQUIRE_MUTUAL_TLS__ is undefined:
           mTLS is disabled (server authenticates itself only).
@@ -695,10 +984,10 @@ Mutual TLS Feature Selection (__REQUIRE_MUTUAL_TLS__)
           Client certificate authentication is required; the TLS context
           is configured accordingly (CA list, verify depth, etc.).
 
-		Security Policy Update:
-			In PROD and BENCH modes, mTLS=0 is NOT permitted.
-			Makefile enforces build failure if mTLS=0 with PROD OR BENCH.
-			mTLS=0 is valid ONLY in DEV mode.
+        Security Policy Update:
+            In PROD and BENCH modes, mTLS=0 is NOT permitted.
+            Makefile enforces build failure if mTLS=0 with PROD OR BENCH.
+            mTLS=0 is valid ONLY in DEV mode.
 
 -------------------------------------------------------------------------------
 Logging flags (from Makefile only)
@@ -715,16 +1004,17 @@ Rules enforced here:
     - LOG_ERROR is always compiled and active in all modes.
 
     - PROD:
-        * WARN / INFO / DEBUG are not allowed.
-        * Any attempt to enable them must be rejected by the Makefile and/or
-          compile-time checks in this file. __LOG_ENABLE_DEBUG__ is forbidden.
+        * ERROR always enabled.
+        * WARN (__LOG_ENABLE_WARN__) and INFO (__LOG_ENABLE_INFO__) are disabled by
+          default but MAY be enabled explicitly.
+        * DEBUG (__LOG_ENABLE_DEBUG__) is strictly forbidden.
 
     - BENCH:
-        * WARN and INFO may be enabled via __LOG_ENABLE_WARN__ and __LOG_ENABLE_INFO__.
+        * WARN (__LOG_ENABLE_WARN__) and INFO (__LOG_ENABLE_INFO__) may be enabled.
         * DEBUG (__LOG_ENABLE_DEBUG__) is forbidden.
 
     - DEV:
-        * WARN, INFO, and DEBUG are enabled by default via the Makefile.
+        * WARN, INFO, and DEBUG are typically enabled via the Makefile.
         * Each may be individually disabled or re-enabled via their associated flags:
           __LOG_ENABLE_WARN__, __LOG_ENABLE_INFO__, __LOG_ENABLE_DEBUG__
         * Sanitisers are typically enabled (SAN=1 by default).
@@ -733,105 +1023,6 @@ Rules enforced here:
       (DEBUG logging is forbidden in PROD and BENCH builds.)
 ===============================================================================
 */
-
-/* ============================================================================
- * Hardened TLS / mTLS Cryptographic Requirements
- * ============================================================================
- *
- * TLS is ALWAYS enabled in ALL build modes. Plain TCP is never permitted.
- *
- * Mutual TLS requirement (controlled by Makefile TLS flag):
- *
- *   Mode   | mTLS Required? | Comments
- *   -------+----------------+-----------------------------------------------
- *   PROD   | YES            | Hardened deployment — fail-closed
- *   BENCH  | YES            | Performance test — hardened trust behaviour
- *   DEV    | OPTIONAL       | Developer convenience
- *                            Enable mTLS explicitly:
- *                              make DEV mTLS=1
- *                            or disable mTLS:
- *                              make DEV mTLS=0
- *
- * ---------------------------------------------------------------------------
- * Security Level Enforcement (__SECURITY_LEVEL__)
- * ---------------------------------------------------------------------------
- *
- * Security Level is passed from the Makefile as:
- *
- *   -D__SECURITY_LEVEL__=<1|2|3>
- *
- * Mapping:
- *
- *   __SECURITY_LEVEL__ = 1
- *        - TLS only
- *        - mTLS optional (DEV only)
- *        - No CRL / no OCSP
- *
- *   __SECURITY_LEVEL__ = 2  → Hardened baseline (mTLS + CRL)
- *        - TLS always ON
- *        - mTLS REQUIRED in PROD/BENCH
- *        - CRL REQUIRED (revocation enforced via CRL)
- *        - OCSP not used (reserved)
- *
- *   __SECURITY_LEVEL__ = 3  → Future hardened mode (mTLS + CRL + OCSP)
- *        - TLS always ON
- *        - OCSP NOT IMPLEMENTED in this server
- *        - Allowed only in DEV builds
- *        - PROD/BENCH builds must reject SECURITY_LEVEL >= 3
- *
- * CRL must exist in hardened builds when SECURITY_LEVEL >= 2.
- * In DEV, default security level is __SECURITY_LEVEL__ = 1, unless set
- * explicitly to a higher value. Thus CRL is optional and failure to configure it only logs a warning.
- */
- 
-/* ============================================================================
- *                    CERTIFICATE CHAIN — VISUAL TRUST FLOW
- * ============================================================================
- *
- *                             (Root of Trust)
- *                            ┌────────────────┐
- *                            │   ca-key.pem   │  ← CA PRIVATE KEY
- *                            │(never shipped) │
- *                            └───────▲────────┘
- *                                    │ signs
- *                                    │
- *                            ┌────────────────┐
- *                            │  ca-cert.pem   │  ← CA CERTIFICATE (public)
- *                            └───────┬────────┘
- *                                    │
- *     ┌──────────────────────────────┼──────────────────────────────┐
- *     │                              │                              │
- *     ▼                              ▼                              ▼
- *
- *  SERVER CERT PATH           CLIENT CERT PATH                 CRL PATH
- *  ------------------         ------------------               -------------
- *
- *   server-key.pem             client-key.pem                  ca-crl.pem
- *   server.csr                 client.csr                      (revocations)
- *        │                          │
- *        └──── signed by CA ────────┘
- *
- *   server-cert.pem            client-cert.pem
- *
- * ============================================================================
- * RUNTIME REQUIREMENTS
- * ============================================================================
- *
- * SERVER must have:
- *      ✔ server-key.pem
- *      ✔ server-cert.pem
- *      ✔ ca-cert.pem
- *      ✔ ca-crl.pem           (required when SECURITY_LEVEL ≥ 2)
- *
- * CLIENT (mTLS only) must have:
- *      ✔ client-key.pem
- *      ✔ client-cert.pem
- *      ✔ ca-cert.pem
- *
- * NEVER COPY:
- *      ✘ ca-key.pem  (CA private key — extremely sensitive)
- * ============================================================================
- */
 
 /* ============================================================================
  * Build Mode Validation and Selection
@@ -852,14 +1043,6 @@ Rules enforced here:
     #define MODE_NAME "PROD"
 #endif
 
-/* ============================================================================
- * Auto-enable sanitisers in DEV (if not explicitly overridden)
- * ============================================================================
- */
-#if defined(__DEV__) && !defined(MODE_SAN)
-    #define MODE_SAN 1
-#endif
-
 /*
  * At this point:
  *   - Exactly one of: (__DEV__, __BENCH__, __PROD__) is logically active.
@@ -868,16 +1051,273 @@ Rules enforced here:
  */
 
 /* ============================================================================
+ * Auto-enable sanitisers in DEV (if not explicitly overridden)
+ * ============================================================================
+ */
+#if defined(__DEV__) && !defined(MODE_SAN)
+    #define MODE_SAN 1
+#endif
+
+/* ============================================================================
  * Logging Sub-Flag Enforcement
  * ============================================================================
  *
  * DEBUG logging is strictly restricted to DEV builds.
  * If __LOG_ENABLE_DEBUG__ is set without __DEV__, this is a hard error.
  */
-
 #if defined(__LOG_ENABLE_DEBUG__) && !defined(__DEV__)
 #error "DEBUG logging is only allowed in __DEV__ builds. Remove __LOG_ENABLE_DEBUG__ or build with DEV=1."
 #endif
+
+#if !defined(__DEV__) && !defined(__REQUIRE_MUTUAL_TLS__)
+#error "mTLS is mandatory in PROD and BENCH builds (mTLS=0 is forbidden)."
+#endif
+
+/* ============================================================================
+ * Security Level Enforcement (__SECURITY_LEVEL__)
+ *
+ * OCSP is not yet implemented. Until full support is added:
+ *
+ *   - DEV builds:
+ *       __SECURITY_LEVEL__ >= 3  → compile-time warning only.
+ *
+ *   - BENCH / PROD builds:
+ *       __SECURITY_LEVEL__ >= 3  → compile-time error (hardened builds
+ *       must not claim OCSP capability until implementation is complete).
+ * ============================================================================
+ */
+#if defined(__SECURITY_LEVEL__) && (__SECURITY_LEVEL__ >= 3)
+    #if defined(__DEV__)
+        #warning "OCSP (__SECURITY_LEVEL__>=3) not implemented yet — continuing in DEV build only"
+    #else
+        #error "OCSP (__SECURITY_LEVEL__>=3) not implemented — __SECURITY_LEVEL__>=3 is forbidden in PROD/BENCH builds"
+    #endif
+#endif
+
+/**
+===============================================================================
+LOGGING ENFORCEMENT BY MODE
+===============================================================================
+
+Legend:
+    "1"   : Always enabled.
+    "0"   : Always disabled.
+    "0/1" : Enabled or disabled depending on compile-time log flags.
+
+Mode / Log-level matrix:
+
+    Mode / Log ->   ERROR  WARN  INFO  DEBUG
+    ----------------------------------------
+    PROD (default)   1     0/1   0/1   0
+    PROD (allowed)   1     1     1     0   (WARN and INFO only if requested)
+    DEV              1     0/1   0/1   0/1
+    BENCH            1     0/1   0/1   0
+    ----------------------------------------
+
+Log request macros (provided via Makefile -> GCC -D):
+
+    -D__LOG_ENABLE_WARN__
+    -D__LOG_ENABLE_INFO__
+    -D__LOG_ENABLE_DEBUG__   (allowed only in DEV builds)
+
+Hard denials:
+
+    - DEBUG logs are never allowed in PROD or BENCH builds.
+    - If __LOG_ENABLE_DEBUG__ is defined without __DEV__, a compile-time
+      error is raised by this file.
+
+===============================================================================
+MAKE COMMAND MATRIX — POLICY SUMMARY (NON-EXHAUSTIVE)
+===============================================================================
+
+This section describes policy constraints only.
+
+The complete set of 144 build invocations — including expected-fail
+combinations — is not enumerated in this source file.
+
+This source file MUST NOT attempt to enumerate or summarise all
+valid or invalid make command permutations.
+
+BUILD FLAG INTERPRETATION RATIONALE (NON-ENUMERATIVE)
+
+- Build modes are identified solely by macro presence:
+    * __DEV__   defined  → DEV mode
+    * __BENCH__ defined  → BENCH mode
+    * neither defined    → PROD mode
+
+- Mutual TLS selection:
+    * mTLS=1  → __REQUIRE_MUTUAL_TLS__ defined
+    * mTLS=0  → __REQUIRE_MUTUAL_TLS__ undefined (DEV only)
+
+- Logging flags map directly:
+    * WARN=1   → __LOG_ENABLE_WARN__
+    * INFO=1   → __LOG_ENABLE_INFO__
+    * DEBUG=1  → __LOG_ENABLE_DEBUG__ (DEV only)
+
+- The Makefile is the enforcement authority.
+- Direct gcc usage is informational only and bypasses Makefile validation.
+
+Policy rules enforced by Makefile and this C file:
+
+  - PROD / BENCH:
+      * TLS always ON
+      * mTLS must be ON
+      * DEBUG logging forbidden
+      * __SECURITY_LEVEL__ >= 3 forbidden
+
+  - DEV:
+      * TLS always ON
+      * mTLS optional
+      * DEBUG logging allowed
+      * __SECURITY_LEVEL__ >= 3 allowed with warning
+
+Any build violating these rules is EXPECTED TO FAIL and such failures
+indicate correct enforcement, not a defect.
+*/
+
+/**
+===============================================================================
+HOST ENFORCEMENT, ALLOWED HOSTS, AND TESTING GUIDE (ECDSA-consistent)
+===============================================================================
+
+-------------------------------------------------------------------------------
+EXPECTED NEGATIVE TEST CASES (INTENTIONAL FAILURES)
+-------------------------------------------------------------------------------
+
+The following scenarios are EXPECTED TO FAIL and validate hardened behaviour.
+Failure in these cases indicates correct enforcement, not a defect.
+
+1) Missing client certificate (mTLS = 1)
+   - Mode: PROD or BENCH (or DEV with mTLS=1)
+   - Client does NOT provide client-cert.pem / client-key.pem
+   - Expected:
+       * TLS handshake fails
+       * Connection is terminated before HTTP processing
+
+2) TLS server name (SNI) mismatch when mTLS = 1
+   - Client uses -servername not present in server certificate SAN
+   - Expected:
+       * TLS hostname verification fails
+       * Handshake does not complete
+
+3) HTTP Host header mismatch in PROD
+   - TLS handshake succeeds
+   - HTTP "Host" header != __ALLOWED_HOST__
+   - Expected:
+       * Server returns HTTP 400 "Host not allowed!"
+       * Connection is closed
+
+4) HTTP Host header mismatch in DEV
+   - Expected:
+       * Request is allowed
+       * Mismatch is logged as WARNING only
+
+5) HTTP Host header mismatch in BENCH
+   - Expected:
+       * Request is accepted
+       * Host value is logged for visibility only
+
+These behaviours are enforced by policy and are required for compliance.
+-------------------------------------------------------------------------------
+
+The Makefile sets __ALLOWED_HOST__ at compile time, using:
+
+    PROD_HOST  ?= secure.lab.linux
+    DEV_HOST   ?= localhost
+    BENCH_HOST ?= 127.0.0.1
+
+and then:
+
+    PROD  build  -> __ALLOWED_HOST__ = $(PROD_HOST)
+    DEV   build  -> __ALLOWED_HOST__ = $(DEV_HOST)
+    BENCH build  -> __ALLOWED_HOST__ = $(BENCH_HOST)
+
+Runtime behaviour:
+
+    PROD  builds:
+        - HTTP "Host" header must match __ALLOWED_HOST__ exactly.
+        - On mismatch, the server returns HTTP 400 "Host not allowed!".
+
+    DEV   builds:
+        - Host mismatch is logged as a warning but the request is still allowed.
+
+    BENCH builds:
+        - Host is logged for visibility but never enforced.
+
+IMPORTANT SECURITY MODEL NOTE ON LAYERED IDENTITY ENFORCEMENT
+
+Identity enforcement occurs at two independent layers:
+
+1) TLS layer (cryptographic identity)
+   - Applies only when mTLS is enabled
+   - Uses certificate SAN validation via SSL_set1_host()
+   - Enforced during the TLS handshake
+   - Failure aborts the connection immediately
+
+2) HTTP layer (application-level routing control)
+   - Uses the HTTP "Host" header
+   - Enforcement depends on build mode:
+       * PROD  : strict rejection
+       * DEV   : warning only
+       * BENCH : logged only
+
+These mechanisms are intentionally independent and MUST NOT be conflated.
+
+TLS hostname verification:
+
+    - When mTLS=1 (mutual TLS), TLS-layer hostname verification is enabled
+      (the code calls SSL_set1_host()).
+    - When mTLS=0, only HTTP-level Host checks (as above) apply.
+*/
+
+/*
+TLS PROTOCOL VERSION TESTING NOTE
+
+- TLS 1.3 is negotiated automatically by OpenSSL when both peers support it.
+- For protocol-level validation or regression testing only, clients MAY
+  explicitly force TLS 1.3 using:
+
+      openssl s_client -tls1_3 ...
+
+- This does NOT bypass any authentication, host enforcement, or policy checks.
+- This note is informational only and does not alter build or runtime policy.
+- See HOST ENFORCEMENT and mTLS policy sections for enforcement details.
+*/
+
+/**
+===============================================================================
+RUNTIME SIGNAL HANDLING AND SHUTDOWN
+===============================================================================
+
+The server installs handlers for:
+
+    - SIGINT   (Ctrl + C)
+    - SIGTERM  (service / system shutdown)
+    - SIGQUIT
+    - SIGTSTP  (Ctrl + Z)
+
+Behaviour:
+
+    - SIGINT and SIGTERM trigger an immediate, clean shutdown.
+    - SIGTSTP (Ctrl + Z) is treated as termination, not suspension.
+
+Rationale:
+
+    - Suspending a TLS server leaves sockets, TLS state, and privileged
+      resources (e.g., port 443) in an unsafe state.
+
+Shutdown sequence:
+
+    1) Stop accepting new connections.
+    2) Gracefully shut down active TLS sessions.
+    3) Close client and listening sockets.
+    4) Free allocated resources and exit cleanly.
+
+These behaviours are identical in DEV, PROD, and BENCH builds and are required
+for predictable and safe operation.
+
+===============================================================================
+*/
 
 /* ============================================================================
  * Logging Helpers and Implementations
@@ -915,7 +1355,7 @@ Rules enforced here:
 
 /*
  * DEBUG logger:
- *   - Only compiled in when both __DEV__ and __LOG_ENABLE_DEBUG__ are defined.
+ *   - Only compiled when both __DEV__ and __LOG_ENABLE_DEBUG__ are defined.
  *   - Otherwise becomes a no-op.
  */
 #if defined(__DEV__) && defined(__LOG_ENABLE_DEBUG__)
@@ -925,6 +1365,19 @@ Rules enforced here:
     #define LOG_DEBUG(fmt, ...) \
         do {} while (0)
 #endif
+
+/* ============================================================================
+ * Convenience errno logging macro
+ * ============================================================================
+ */
+#define LOG_ERROR_ERRNO(fmt, ...)                               \
+    do {                                                        \
+        char errbuf[512];                                       \
+        const char *errstr = safe_strerror(errno,               \
+                                           errbuf,              \
+                                           sizeof(errbuf));     \
+        LOG_ERROR(fmt ": %s", ##__VA_ARGS__, errstr);           \
+    } while (0)
 
 static inline const char * safe_strerror(int err, char *buf, size_t buflen)
 {
@@ -940,19 +1393,6 @@ static inline const char * safe_strerror(int err, char *buf, size_t buflen)
 }
 
 /*
- * Convenience logger that appends strerror_r text for the current errno.
- * Uses POSIX strerror_r semantics; falls back to "errno N" if needed.
- */
-#define LOG_ERROR_ERRNO(fmt, ...)                               \
-    do {                                                        \
-        char errbuf[512];                                       \
-        const char *errstr = safe_strerror(errno,               \
-                                           errbuf,              \
-                                           sizeof(errbuf));     \
-        LOG_ERROR(fmt ": %s", ##__VA_ARGS__, errstr);           \
-    } while (0)
-
-/*
  * Runtime security banner (printed once at startup).
  *
  * Intent:
@@ -966,8 +1406,7 @@ static inline const char * safe_strerror(int err, char *buf, size_t buflen)
  *   - This is intentionally lightweight (Option A): one-time banner only.
  *     No per-request noise, no repeated printing.
  */
-static void
-print_runtime_security_banner(void)
+static void print_runtime_security_banner(void)
 {
     LOG_INFO("==============================================================");
     LOG_INFO(" Runtime Security Summary (Build + Policy Snapshot)");
@@ -980,10 +1419,14 @@ print_runtime_security_banner(void)
 #ifdef __REQUIRE_MUTUAL_TLS__
     LOG_INFO(" mTLS: ON  (client certificate is REQUIRED)");
 #else
-    LOG_INFO(" mTLS: OFF (server-auth TLS only; client cert not required)");
+    #if defined(__DEV__)
+        LOG_INFO(" mTLS: OFF (DEV mode — server-auth TLS only; client cert not required)");
+    #else
+        LOG_ERROR(" mTLS: OFF — INVALID STATE (should not occur in PROD/BENCH)");
+    #endif
 #endif
 
-    /* Host enforcement (compile-time) */
+/* Host enforcement (compile-time) */
 #ifdef __ALLOWED_HOST__
     LOG_INFO(" Allowed Host (HTTP Host header): %s", __ALLOWED_HOST__);
 #else
@@ -1030,565 +1473,6 @@ print_runtime_security_banner(void)
 #endif
     LOG_INFO("==============================================================");
 }
-
-/**
-===============================================================================
-LOGGING ENFORCEMENT BY MODE
-===============================================================================
-
-Legend:
-    "1"   : Always enabled.
-    "0"   : Always disabled.
-    "0/1" : Enabled or disabled depending on compile-time log flags.
-
-Mode / Log-level matrix:
-
-    Mode / Log ->   ERROR  WARN  INFO  DEBUG
-    ----------------------------------------
-    PROD (default)   1     0/1   0/1   0
-    PROD (allowed)   1     1     1     0   (WARN and INFO only if requested)
-    DEV              1     0/1   0/1   0/1
-    BENCH            1     0/1   0/1   0
-    ----------------------------------------
-
-Log request macros (provided via Makefile -> GCC -D):
-
-    -D__LOG_ENABLE_WARN__
-    -D__LOG_ENABLE_INFO__
-    -D__LOG_ENABLE_DEBUG__   (allowed only in DEV builds)
-
-Hard denials:
-
-    - DEBUG logs are never allowed in PROD or BENCH builds.
-    - If __LOG_ENABLE_DEBUG__ is defined without __DEV__, a compile-time
-      error is raised by this file.
-
-===============================================================================
-VALID MAKE COMMANDS
-===============================================================================
-
-PROD builds (PROD, DEBUG not allowed):
-
-    make PROD mTLS=1
-    make PROD mTLS=0
-    make PROD mTLS=1 WARN=1
-    make PROD mTLS=1 INFO=1
-    make PROD mTLS=1 WARN=1 INFO=1
-
-DEV builds (DEV, all logging flags allowed):
-
-    make DEV mTLS=1
-    make DEV mTLS=0
-    make DEV mTLS=1 WARN=1
-    make DEV mTLS=0 WARN=1
-    make DEV mTLS=1 INFO=1
-    make DEV mTLS=0 INFO=1
-    make DEV mTLS=1 WARN=1 INFO=1
-    make DEV mTLS=0 WARN=1 INFO=1
-    make DEV mTLS=1 DEBUG=1
-    make DEV mTLS=0 DEBUG=1
-    make DEV mTLS=1 WARN=1 DEBUG=1
-    make DEV mTLS=0 WARN=1 DEBUG=1
-    make DEV mTLS=1 INFO=1 DEBUG=1
-    make DEV mTLS=0 INFO=1 DEBUG=1
-    make DEV mTLS=1 WARN=1 INFO=1 DEBUG=1
-    make DEV mTLS=0 WARN=1 INFO=1 DEBUG=1
-
-BENCH builds (BENCH, DEBUG not allowed):
-
-    make BENCH mTLS=1
-    make BENCH mTLS=1 WARN=1
-    make BENCH mTLS=1 INFO=1
-    make BENCH mTLS=1 WARN=1 INFO=1
-
-Any other combination of PROD / BENCH / mTLS / WARN / INFO / DEBUG
-is considered invalid and should fail at Makefile or compile time.
-
-Total valid build combinations: 34.
-
-===============================================================================
-CONFIGURATION MAPPING (MAKE vs DIRECT gcc -D... USAGE)
-===============================================================================
-
-This server is intended to be built via the Makefile. The Makefile ensures:
-
-    - Exactly one mode is selected: PROD / DEV / BENCH.
-    - mTLS mode (mTLS=0 / mTLS=1) is correctly mapped to __REQUIRE_MUTUAL_TLS__.
-    - Logging macros (__LOG_ENABLE_WARN__/INFO/DEBUG) are consistent with mode.
-    - __ALLOWED_HOST__ is set to the correct value per mode.
-    - Hardened compiler/linker flags are applied for PROD and BENCH builds.
-
-However, for debugging, experimentation, or when integrating with other build
-systems, it can be useful to know how a given "make" configuration maps onto
-an equivalent direct "gcc -D..." command.
-
-Important rules:
-
-    - The Makefile builds are the canonical, hardened builds.
-    - Direct gcc examples below are approximate and do NOT include all
-      hardening flags (RELRO, FORTIFY, PIE, etc.).
-    - Direct gcc builds should NOT be used for production deployment.
-*/
-
-/**
--------------------------------------------------------------------------------
-1) PROD mode, mTLS=1 (mutual TLS), WARN+INFO logs enabled
--------------------------------------------------------------------------------
-
-Configuration:
-    PROD mode (hardened), mutual TLS required, WARN+INFO logs enabled.
-
-Make command (recommended):
-
-    make PROD mTLS=1 WARN=1 INFO=1
-
-Equivalent gcc command (approximate):
-
-    gcc TCP_Server.c -o TCP_Server \
-        -D__REQUIRE_MUTUAL_TLS__ \
-        -D__ALLOWED_HOST__=\"secure.lab.linux\" \
-        -D__LOG_ENABLE_WARN__ \
-        -D__LOG_ENABLE_INFO__ \
-        -std=c2x \
-        -Wall -Wextra -Werror -Wpedantic \
-        -Wformat=2 -Wshadow -Wpointer-arith \
-        -Wcast-align -Wwrite-strings -Wconversion \
-        -O2 \
-        -lssl -lcrypto
-
-Why equivalent:
-
-    - PROD mode: neither __DEV__ nor __BENCH__ is defined.
-    - mTLS=1 maps to __REQUIRE_MUTUAL_TLS__.
-    - WARN=1 and INFO=1 map to __LOG_ENABLE_WARN__ and __LOG_ENABLE_INFO__.
-    - __ALLOWED_HOST__ is set to "secure.lab.linux" as in the Makefile defaults.
-
-Security note:
-
-    - This gcc example does not enable all the hardening flags that the
-      Makefile may add (such as full RELRO, PIE, stack protections).
-    - Use the Makefile build for real deployments.
-
--------------------------------------------------------------------------------
-2) PROD mode, mTLS=0 (server-auth only), WARN logs only
--------------------------------------------------------------------------------
-
-Configuration:
-    PROD mode, server-auth TLS only, WARN logs enabled (no mutual TLS).
-
-Make command:
-
-    make PROD mTLS=0 WARN=1
-
-Equivalent gcc command:
-
-    gcc TCP_Server.c -o TCP_Server \
-        -D__ALLOWED_HOST__=\"secure.lab.linux\" \
-        -D__LOG_ENABLE_WARN__ \
-        -std=c2x \
-        -Wall -Wextra -Werror -Wpedantic \
-        -Wformat=2 -Wshadow -Wpointer-arith \
-        -Wcast-align -Wwrite-strings -Wconversion \
-        -O2 \
-        -lssl -lcrypto
-
-Why equivalent:
-
-    - __REQUIRE_MUTUAL_TLS__ is not defined (mTLS=0).
-    - WARN logs are enabled via __LOG_ENABLE_WARN__.
-    - Host enforcement for PROD is still strict: HTTP Host must match
-      __ALLOWED_HOST__.
-
-Security note:
-
-    - Server still uses TLS on port 443, but does not require client
-      certificates.
-    - Hardened deployment should still use the Makefile build.
-
--------------------------------------------------------------------------------
-3) DEV mode, mTLS=1 (mutual TLS)
--------------------------------------------------------------------------------
-
-Configuration:
-    DEV mode: mutual TLS, WARN + INFO + DEBUG logs are disabled.
-
-Make command:
-
-    make DEV mTLS=1
-
-Equivalent gcc command:
-
-    gcc TCP_Server.c -o TCP_Server \
-        -D__DEV__ \
-        -D__REQUIRE_MUTUAL_TLS__ \
-        -D__LOG_ENABLE_WARN__ \
-        -D__LOG_ENABLE_INFO__ \
-        -D__LOG_ENABLE_DEBUG__ \
-        -std=c2x \
-        -g3 -O0 \
-        -fsanitize=address,undefined \
-        -Wall -Wextra -Wpedantic \
-        -Wformat=2 -Wshadow -Wpointer-arith \
-        -Wcast-align -Wwrite-strings -Wconversion \
-        -lssl -lcrypto
-
-Why equivalent:
-
-    - DEV maps to __DEV__ (DEV mode).
-    - mTLS=1 maps to __REQUIRE_MUTUAL_TLS__.
-    - DEV builds enable sanitisers and debug information.
-
-Security note:
-
-    - DEV builds are not hardened for production (sanitisers, no chroot, no
-      privilege drop).
-    - Intended only for development and debugging.
-
--------------------------------------------------------------------------------
-4) DEV mode, mTLS=0 (server-auth only), DEBUG-only logging
--------------------------------------------------------------------------------
-
-Configuration:
-    DEV mode, mTLS=0 (no mutual TLS), DEBUG logging enabled (no WARN/INFO).
-
-Make command:
-
-    make DEV mTLS=0 DEBUG=1
-
-Equivalent gcc command:
-
-    gcc TCP_Server.c -o TCP_Server \
-        -D__DEV__ \
-        -D__LOG_ENABLE_DEBUG__ \
-        -std=c2x \
-        -g3 -O0 \
-        -fsanitize=address,undefined \
-        -Wall -Wextra -Wpedantic \
-        -Wformat=2 -Wshadow -Wpointer-arith \
-        -Wcast-align -Wwrite-strings -Wconversion \
-        -lssl -lcrypto
-
-Why equivalent:
-
-    - DEV mode is selected with __DEV__.
-    - No __REQUIRE_MUTUAL_TLS__ means mTLS=0 (still encrypted, no client certs).
-    - DEBUG=1 maps to __LOG_ENABLE_DEBUG__.
-    - Sanitisers and debug info reflect DEV mode.
-
-Security note:
-
-    - DEBUG logging may expose internal data and is never allowed in PROD or
-      BENCH builds.
-    - Use only in safe development environments.
-
--------------------------------------------------------------------------------
-5) BENCH mode, mTLS=1 (mutual TLS), INFO logs only
--------------------------------------------------------------------------------
-
-Configuration:
-    BENCH mode, mTLS=1, INFO logs enabled only.
-
-Make command:
-
-    make BENCH mTLS=1 INFO=1
-
-Equivalent gcc command:
-
-    gcc TCP_Server.c -o TCP_Server \
-        -D__BENCH__ \
-        -D__REQUIRE_MUTUAL_TLS__ \
-        -D__ALLOWED_HOST__=\"127.0.0.1\" \
-        -D__LOG_ENABLE_INFO__ \
-        -std=c2x \
-        -O2 \
-        -Wall -Wextra -Wpedantic \
-        -Wformat=2 -Wshadow -Wpointer-arith \
-        -Wcast-align -Wwrite-strings -Wconversion \
-        -lssl -lcrypto
-
-Why equivalent:
-
-    - BENCH maps to __BENCH__, with neither __DEV__ nor __PROD__ defined.
-    - mTLS=1 maps to __REQUIRE_MUTUAL_TLS__.
-    - INFO=1 maps to __LOG_ENABLE_INFO__.
-    - __ALLOWED_HOST__ is typically 127.0.0.1 for BENCH builds.
-
-Security note:
-
-    - BENCH mode aims for realistic performance with minimal logging.
-    - DEBUG logging is forbidden to avoid affecting timing measurements.
-
--------------------------------------------------------------------------------
-6) BENCH mode, mTLS=0 (server-auth only), WARN logs only
--------------------------------------------------------------------------------
-
-Configuration:
-    BENCH mode, mTLS=0, WARN logs enabled.
-
-Make command:
-
-    make BENCH mTLS=0 WARN=1
-
-Equivalent gcc command:
-
-    gcc TCP_Server.c -o TCP_Server \
-        -D__BENCH__ \
-        -D__ALLOWED_HOST__=\"127.0.0.1\" \
-        -D__LOG_ENABLE_WARN__ \
-        -std=c2x \
-        -O2 \
-        -Wall -Wextra -Wpedantic \
-        -Wformat=2 -Wshadow -Wpointer-arith \
-        -Wcast-align -Wwrite-strings -Wconversion \
-        -lssl -lcrypto
-
-Why equivalent:
-
-    - __BENCH__ selects BENCH mode.
-    - No __REQUIRE_MUTUAL_TLS__ corresponds to mTLS=0 (still TLS, no client
-      certificates).
-    - WARN=1 maps to __LOG_ENABLE_WARN__.
-
-Security note:
-
-    - These builds are for benchmarking. Use the Makefile and avoid adding
-      DEBUG logs or extra diagnostics which would distort measurements.
-
--------------------------------------------------------------------------------
-7) Minimal examples (summary)
--------------------------------------------------------------------------------
-
-Minimal PROD, mutual TLS, no extra logs:
-
-    make PROD mTLS=1
-
-Approximate gcc:
-
-    gcc TCP_Server.c -o TCP_Server \
-        -D__REQUIRE_MUTUAL_TLS__ \
-        -D__ALLOWED_HOST__=\"secure.lab.linux\" \
-        -std=c2x -O2 \
-        -Wall -Wextra -Wpedantic \
-        -Wformat=2 -Wshadow -Wpointer-arith \
-        -Wcast-align -Wwrite-strings -Wconversion \
-        -lssl -lcrypto
-
-Minimal DEV, server-auth only, no extra logs:
-
-    make DEV mTLS=0
-
-Approximate gcc:
-
-    gcc TCP_Server.c -o TCP_Server \
-        -D__DEV__ \
-        -std=c2x \
-        -g3 -O0 \
-        -fsanitize=address,undefined \
-        -Wall -Wextra -Wpedantic \
-        -Wformat=2 -Wshadow -Wpointer-arith \
-        -Wcast-align -Wwrite-strings -Wconversion \
-        -lssl -lcrypto
-
-Minimal BENCH, mutual TLS, no extra logs:
-
-    make BENCH mTLS=1
-
-Approximate gcc:
-
-    gcc TCP_Server.c -o TCP_Server \
-        -D__BENCH__ \
-        -D__REQUIRE_MUTUAL_TLS__ \
-        -D__ALLOWED_HOST__=\"127.0.0.1\" \
-        -std=c2x \
-        -O2 \
-        -Wall -Wextra -Wpedantic \
-        -Wformat=2 -Wshadow -Wpointer-arith \
-        -Wcast-align -Wwrite-strings -Wconversion \
-        -lssl -lcrypto
-
-Again, for any deployment, use the Makefile-based builds. The gcc examples
-are only provided to clarify which -D macros and flags correspond to which
-Makefile configurations.
-*/
-
-/**
-===============================================================================
-HOST ENFORCEMENT, ALLOWED HOSTS, AND TESTING GUIDE (ECDSA-consistent)
-===============================================================================
-
-The Makefile sets __ALLOWED_HOST__ at compile time, using:
-
-    PROD_HOST  ?= secure.lab.linux
-    DEV_HOST   ?= localhost
-    BENCH_HOST ?= 127.0.0.1
-
-and then:
-
-    PROD  build  -> __ALLOWED_HOST__ = $(PROD_HOST)
-    DEV   build  -> __ALLOWED_HOST__ = $(DEV_HOST)
-    BENCH build  -> __ALLOWED_HOST__ = $(BENCH_HOST)
-
-Runtime behaviour:
-
-    PROD  builds:
-        - HTTP "Host" header must match __ALLOWED_HOST__ exactly.
-        - On mismatch, the server returns HTTP 400 "Host not allowed!".
-
-    DEV   builds:
-        - Host mismatch is logged as a warning but the request is still allowed.
-
-    BENCH builds:
-        - Host is logged for visibility but never enforced.
-
-TLS hostname verification:
-
-    - When mTLS=1 (mutual TLS), TLS-layer hostname verification is enabled
-      (the code calls SSL_set1_host()).
-    - When mTLS=0, only HTTP-level Host checks (as above) apply.
-
-===============================================================================
-TESTING GUIDE (OPENSSL S_CLIENT EXAMPLES, PORT 443) — ECDSA KEYS
-===============================================================================
-
-All examples assume:
-    - Server listens on port 443.
-    - Server certificate:    server-cert.pem
-    - Server private key:    server-key.pem
-    - CA certificate (trust anchor): ca-cert.pem
-    - Client certificate/key (mTLS): client-cert.pem / client-key.pem
-
-Notes:
-    - Use the ECDSA private keys generated above (prime256v1).
-    - s_client will negotiate ECDHE-ECDSA suites automatically when server
-      and CA/certs are ECDSA-capable.
-    - Use -tls1_3 to force TLS1.3 (if testing 1.3 behaviour), or omit to let
-      OpenSSL select the best supported protocol.
-
-DEV mode, mTLS=1 (mutual TLS, all logs enabled):
-    Build:
-        make DEV mTLS=1
-    Test:
-        openssl s_client -connect 127.0.0.1:443 \
-            -servername localhost \
-            -cert client-cert.pem -key client-key.pem \
-            -CAfile ca-cert.pem -crlf -tls1_3
-    HTTP request:
-        GET / HTTP/1.1
-        Host: localhost
-        <press Enter twice>
-    Expected:
-        - TLS handshake succeeds if client certificate chains to ca-cert.pem.
-        - TLS uses ECDHE-ECDSA cipher suites (server & client use ECDSA keys).
-        - If Host != "localhost", DEV logs a warning but allows request.
-
-PROD mode, mTLS=1 (mutual TLS, strict host enforcement):
-    Build:
-        make PROD mTLS=1 WARN=1 INFO=1
-    Test:
-        openssl s_client -connect 127.0.0.1:443 \
-            -servername secure.lab.linux \
-            -cert client-cert.pem -key client-key.pem \
-            -CAfile ca-cert.pem -crlf -tls1_3
-    HTTP request:
-        GET / HTTP/1.1
-        Host: secure.lab.linux
-        <press Enter twice>
-    Expected:
-        - TLS handshake succeeds only when:
-            * client-cert.pem chains to ca-cert.pem, and
-            * server-cert.pem includes SAN/CN matching "secure.lab.linux".
-        - Server enforces Host header strictly and returns HTTP 400 if mismatch.
-
-BENCH mode, mTLS=0 (server-auth TLS, minimal logging):
-    Build:
-        make BENCH mTLS=0 INFO=1
-    Test:
-        openssl s_client -connect 127.0.0.1:443 \
-            -servername 127.0.0.1 \
-            -CAfile ca-cert.pem -crlf -tls1_3
-    HTTP request:
-        GET / HTTP/1.1
-        Host: 127.0.0.1
-        <press Enter twice>
-    Expected:
-        - TLS handshake succeeds using server’s ECDSA certificate only.
-        - Client is not required to present a certificate.
-        - Host header is logged but not enforced.
-
-Negative tests (expected failures):
-    1) Missing client certificate with mTLS=1:
-        - Build with mTLS=1.
-        - Run s_client without -cert/-key.
-        - Handshake must fail (server rejects connection).
-    2) Wrong -servername with mTLS=1:
-        - Supply a name not present in server certificate SAN/CN.
-        - TLS hostname verification must fail (SSL_set1_host enforces TLS identity).
-    3) Wrong Host header in PROD:
-        - Use Host different from __ALLOWED_HOST__.
-        - Server returns HTTP 400 "Host not allowed!".
-*/
-
-/**
-===============================================================================
-RUNTIME SAFETY AND SHUTDOWN BEHAVIOR
-===============================================================================
-
-Signals and termination:
-
-    - SIGINT, SIGTERM, SIGQUIT, SIGTSTP are trapped.
-    - SIGTSTP (Ctrl+Z) is treated as a request to terminate, not to suspend.
-    - On termination, the server:
-        * shuts down the TLS connection,
-        * closes client and listening sockets,
-        * frees SSL objects and address info,
-        * logs a final termination message.
-
-Sandboxing (PROD and BENCH):
-
-    - The process should start with sufficient privileges to:
-        * bind port 443,
-        * chroot into a restricted directory (for example: /var/secure-mtls-server),
-        * drop privileges to an unprivileged account (for example: svc_mtls_server).
-
-    - Certificate and key files should be placed inside the chroot and owned
-      by root:root with strict permissions (for example: 750).
-
-DEV builds:
-
-    - No chroot or privilege drop is used (to simplify debugging).
-    - Sanitisers are enabled via Makefile flags (ASan, UBSan).
-
-*/
-
-/* ============================================================================
- * Security Level Enforcement (__SECURITY_LEVEL__)
- *
- * OCSP is not yet implemented. Until full support is added:
- *
- *   - DEV builds:
- *       __SECURITY_LEVEL__ >= 3  → compile-time warning only.
- *
- *   - BENCH / PROD builds:
- *       __SECURITY_LEVEL__ >= 3  → compile-time error (hardened builds
- *       must not claim OCSP capability until implementation is complete).
- * ============================================================================
- */
-#if defined(__SECURITY_LEVEL__) && (__SECURITY_LEVEL__ >= 3)
-    #if defined(__DEV__)
-        #warning "OCSP (SECURITY_LEVEL>=3) not implemented yet — continuing in DEV build only"
-    #else
-        #error "OCSP (SECURITY_LEVEL>=3) not implemented — SECURITY_LEVEL>=3 is forbidden in PROD/BENCH builds"
-    #endif
-#endif
-
-static SSL_CTX* ctx = (SSL_CTX*)NULL;
-static SSL* ssl = (SSL*)NULL;
-static struct addrinfo* server = (struct addrinfo*)NULL;
-static int iSocketFieldDescription = -1;
-static int iAcceptedClientFileDescriptor = -1;
-
-static volatile sig_atomic_t g_exit_requested = 0;
-static volatile sig_atomic_t g_last_signal = 0;
 
 static void SignalHandler_SetExitFlag(int signum)
 {
@@ -1694,7 +1578,8 @@ static void rvShutDownSSL_AndCloseFD(void)
  *      * The process is expected to start as root (to allow chroot + priv-drop).
  *      * After InitialiseServer() binds the listening socket:
  *          - chroot() into /var/secure-mtls-server
- *          - drop to svc_mtls_server:svc_mtls_server
+ *          - drop to svc_mtls_server:svc_mtls_server (low-privilege service account,
+ *            with the *user* and *group* identity for the process)
  *          - apply RLIMIT_NOFILE and RLIMIT_NPROC
  *
  *  - In __DEV__ builds:
@@ -1722,7 +1607,8 @@ static bool rvDropPrivileges_AndChroot(void)
 			break;
 		}
 
-		/* Enter hardened jail. Directory must already exist and be owned by root. */
+		/* Chroot to the mandatory hardened jail / directory: /var/secure-mtls-server
+			 Directory must already exist and be owned by root along with correct group set. . */
 		if (0 != chroot("/var/secure-mtls-server"))
 		{
 			LOG_ERROR_ERRNO("chroot(\"/var/secure-mtls-server\") failed");
@@ -2895,7 +2781,7 @@ int main(void)
 		 * PROD / BENCH builds:
 		 *   - Process is expected to start as root so we can chroot and drop privileges.
 		 *   - After InitialiseServer() binds the listening socket, we:
-		 *       - chroot into /var/secure-mtls-server
+		 *       - chroot into /var/secure-mtls-server (the *user* and *group* identity for the process)
 		 *       - drop to svc_mtls_server:svc_mtls_server
 		 *       - apply resource limits (NOFILE / NPROC)
 		 */
